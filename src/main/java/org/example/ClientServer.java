@@ -40,6 +40,7 @@ public class ClientServer {
 
         for (ServiceHealth node : nodes) {
             int hash = hash(node.getService().getId());
+
             hashRing.put(hash, node);
         }
     }
