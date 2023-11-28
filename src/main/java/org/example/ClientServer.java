@@ -24,7 +24,7 @@
             // Client identifier (can be IP, username, etc.)
             String clientId = UUID.randomUUID().toString(); // Example: Use UUID for simplicity
 
-            startRegularHealthChecks();
+            //startRegularHealthChecks();
 
             // Connect to Consul and build the hash ring
             buildHashRing();
@@ -46,31 +46,31 @@
             // Here, establish a connection to the server (e.g., via sockets)
         }
 
-        private static void startRegularHealthChecks() {
-            ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor();
-            executor.scheduleAtFixedRate(() -> {
-                // Assuming the health check endpoint is running on port 8081
-                checkServerHealth("http://localhost:8081/health");
-            }, 0, 10, TimeUnit.SECONDS);
-        }
+//        private static void startRegularHealthChecks() {
+//            ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor();
+//            executor.scheduleAtFixedRate(() -> {
+//                // Assuming the health check endpoint is running on port 8081
+//                checkServerHealth("http://localhost:8081/health");
+//            }, 0, 10, TimeUnit.SECONDS);
+//        }
 
-        private static void checkServerHealth(String urlString) {
-            try {
-                URL url = new URL(urlString);
-                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-                conn.setRequestMethod("GET");
-                conn.connect();
-
-                int responseCode = conn.getResponseCode();
-                if (responseCode != 200) {
-                    System.out.println("Server health check failed");
-                } else {
-                    System.out.println("Server is healthy");
-                }
-            } catch (IOException e) {
-                System.out.println("Failed to perform health check: " + e.getMessage());
-            }
-        }
+//        private static void checkServerHealth(String urlString) {
+//            try {
+//                URL url = new URL(urlString);
+//                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+//                conn.setRequestMethod("GET");
+//                conn.connect();
+//
+//                int responseCode = conn.getResponseCode();
+//                if (responseCode != 200) {
+//                    System.out.println("Server health check failed");
+//                } else {
+//                    System.out.println("Server is healthy");
+//                }
+//            } catch (IOException e) {
+//                System.out.println("Failed to perform health check: " + e.getMessage());
+//            }
+//        }
 
 
         private static void buildHashRing() {
@@ -78,12 +78,12 @@
             HealthClient healthClient = consul.healthClient();
             List<ServiceHealth> nodes = healthClient.getHealthyServiceInstances("file-server3").getResponse();
 
-            for (ServiceHealth service : nodes) {
-                if (service.getChecks().stream().allMatch(check -> check.getStatus().equals("passing"))) {
-                    System.out.println("Active Service: " + service.getService().getId());
-                    // Connect to the service here
-                }
-            }
+//            for (ServiceHealth service : nodes) {
+//                if (service.getChecks().stream().allMatch(check -> check.getStatus().equals("passing"))) {
+//                    System.out.println("Active Service: " + service.getService().getId());
+//                    // Connect to the service here
+//                }
+//            }
             for (ServiceHealth node : nodes) {
                 int hash = hash(node.getService().getId());
 

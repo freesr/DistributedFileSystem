@@ -44,39 +44,12 @@ public class FileServer {
 
         System.out.println("Server stopped.");
 
-//        while (running) {
-//            // Here you'd have code to listen for and handle client connections
-//            // For example, accepting connections on a ServerSocket
-//
-//            try {
-//                // This is a placeholder for demonstration
-//                Thread.sleep(1000); // Sleep for a second (simulating a server process)
-//            } catch (InterruptedException ie) {
-//                Thread.currentThread().interrupt();
-//                System.out.println("Server interrupted.");
-//                break;
-//            }
-//        }
 
-       // new FileServer().startServer(port);
 
           buildHashRing();
-//        Thread dthread = new Thread (new ListenerPort(port));
-//        dthread.setName("AttendFileDownloadRequest");
-//        dthread.start();
-//        try (ServerSocket serverSocket = new ServerSocket(SERVER_PORT)) {
-//            System.out.println("FileServer is running on port " + SERVER_PORT);
-//
-//            while (true) {
-//                Socket clientSocket = serverSocket.accept();
-//                handleClient(clientSocket);
-//            }
-//        } catch (IOException e) {
-//            throw new RuntimeException(e);
-//        }
 
 
-        // Server's main loop to handle client connections
+
     }
 
     private static void startHealthCheckEndpoint(int port) {
@@ -127,21 +100,6 @@ public class FileServer {
 
     }
 
-    private static void socketCnnection(int port){
-//        try (ServerSocket serverSocket = new ServerSocket(port)) {
-//            System.out.println("Server started, listening on: " + port);
-//
-//            while (true) {
-//                Socket clientSocket = serverSocket.accept();
-//                System.out.println("Client connected: " + clientSocket.getInetAddress());
-//
-//                new Thread(() -> handleClient(clientSocket)).start();
-//            }
-//        } catch (IOException e) {
-//            System.out.println("Server exception: " + e.getMessage());
-//            e.printStackTrace();
-       // }
-    }
 
 
     private static void buildHashRing() {
