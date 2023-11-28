@@ -2,10 +2,15 @@ package org.example;
 import com.orbitz.consul.AgentClient;
 import com.orbitz.consul.Consul;
 import com.orbitz.consul.HealthClient;
+import com.orbitz.consul.model.agent.Registration;
 import com.orbitz.consul.model.health.ServiceHealth;
 import com.orbitz.consul.model.agent.ImmutableRegistration;
+import com.sun.net.httpserver.HttpExchange;
+import com.sun.net.httpserver.HttpHandler;
+import com.sun.net.httpserver.HttpServer;
 
 import java.io.*;
+import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.*;
@@ -27,7 +32,16 @@ public class FileServer {
         int port = Integer.parseInt(args[1]);       // Port number as a command line argument
 
         // Register with Consul
-        registerServiceWithConsul(serverId, "file-server", port);
+        registerServiceWithConsul(serverId, "file-server3", port);
+        try {
+            startServer(port);
+        } catch (IOException e) {
+            e.printStackTrace();
+        } finally {
+            deregisterServiceFromConsul();
+        }
+       // startHealthCheckEndpoint(port);
+
         System.out.println("Server stopped.");
 
 //        while (running) {
@@ -44,7 +58,7 @@ public class FileServer {
 //            }
 //        }
 
-        new FileServer().startServer(port);
+       // new FileServer().startServer(port);
 
           buildHashRing();
 //        Thread dthread = new Thread (new ListenerPort(port));
@@ -65,20 +79,68 @@ public class FileServer {
         // Server's main loop to handle client connections
     }
 
-    public void startServer(int port) {
+    private static void startHealthCheckEndpoint(int port) {
+        try {
+            HttpServer server = HttpServer.create(new InetSocketAddress(port+1000), 0);
+            server.createContext("/health", new HealthCheckHandler());
+            server.setExecutor(null); // creates a default executor
+            server.start();
+            System.out.println("Health check endpoint running on port " + (8081));
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    static class HealthCheckHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            String response = "OK";
+            exchange.sendResponseHeaders(200, response.getBytes().length);
+            OutputStream os = exchange.getResponseBody();
+            os.write(response.getBytes());
+            os.close();
+        }
+    }
+
+    private static void startServer(int port) throws IOException {
+        HttpServer httpServer = HttpServer.create(new InetSocketAddress(port+1000), 0);
+        httpServer.createContext("/health", new HealthCheckHandler()); // Health check endpoint
+        httpServer.setExecutor(null); // Default executor
+        httpServer.start();
+        System.out.println("HTTP Server started on port: " + port);
+
+        // Start the Socket Server for handling client connections
         try (ServerSocket serverSocket = new ServerSocket(port)) {
-            System.out.println("Server started, listening on: " + port);
+            System.out.println("Socket Server started, listening on: " + port);
 
             while (true) {
                 Socket clientSocket = serverSocket.accept();
                 System.out.println("Client connected: " + clientSocket.getInetAddress());
 
+                // Handle each client connection in a separate thread
                 new Thread(() -> handleClient(clientSocket)).start();
             }
         } catch (IOException e) {
-            System.out.println("Server exception: " + e.getMessage());
+            System.out.println("Socket Server exception: " + e.getMessage());
             e.printStackTrace();
         }
+
+    }
+
+    private static void socketCnnection(int port){
+//        try (ServerSocket serverSocket = new ServerSocket(port)) {
+//            System.out.println("Server started, listening on: " + port);
+//
+//            while (true) {
+//                Socket clientSocket = serverSocket.accept();
+//                System.out.println("Client connected: " + clientSocket.getInetAddress());
+//
+//                new Thread(() -> handleClient(clientSocket)).start();
+//            }
+//        } catch (IOException e) {
+//            System.out.println("Server exception: " + e.getMessage());
+//            e.printStackTrace();
+       // }
     }
 
 
@@ -86,7 +148,7 @@ public class FileServer {
         // Build the hash ring logic as in the client
         Consul consul = Consul.builder().build();
         HealthClient healthClient = consul.healthClient();
-        List<ServiceHealth> nodes = healthClient.getHealthyServiceInstances("file-server").getResponse();
+        List<ServiceHealth> nodes = healthClient.getHealthyServiceInstances("file-server3").getResponse();
 
         for (ServiceHealth node : nodes) {
             int hash = node.getService().getId().hashCode();
@@ -94,7 +156,7 @@ public class FileServer {
         }
     }
 
-    private void handleClient(Socket clientSocket) {
+    private static void handleClient(Socket clientSocket) {
          String SAVE_DIRECTORY = "../../../../Files"; // Directory to save received files
 
         try (DataInputStream dataInputStream = new DataInputStream(clientSocket.getInputStream())) {
@@ -173,17 +235,27 @@ public class FileServer {
     }
 
     private static void registerServiceWithConsul(String serviceId, String serviceName, int port) {
-        Consul consul = Consul.builder().build(); // Connect to Consul on localhost
+        Consul consul = Consul.builder().build();
         AgentClient agentClient = consul.agentClient();
+
+        Registration.RegCheck regCheck = Registration.RegCheck.http(
+                "http://localhost:" + (port+1000) + "/health", 10L); // Health check every 10 seconds
 
         ImmutableRegistration registration = ImmutableRegistration.builder()
                 .id(serviceId)
                 .name(serviceName)
+                .addChecks(regCheck)
                 .port(port)
                 .build();
 
         agentClient.register(registration);
         System.out.println("Registered service with Consul: " + serviceId);
+    }
+    private static void deregisterServiceFromConsul() {
+        Consul consul = Consul.builder().build();
+        AgentClient agentClient = consul.agentClient();
+        agentClient.deregister(serverId);
+        System.out.println("Deregistered service from Consul: " + serverId);
     }
 
     private static int hash(String key) {
