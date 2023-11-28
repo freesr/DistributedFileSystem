@@ -13,12 +13,23 @@
     import java.util.NavigableMap;
     import java.util.TreeMap;
     import java.util.UUID;
+    import java.util.concurrent.atomic.AtomicReference;
     import java.util.concurrent.Executors;
     import java.util.concurrent.ScheduledExecutorService;
     import java.util.concurrent.TimeUnit;
 
     public class ClientServer {
         private static final NavigableMap<Integer, ServiceHealth> hashRing = new TreeMap<>();
+        private static final AtomicReference<ServerDetails> connectedServerDetails = new AtomicReference<>();
+        private static class ServerDetails {
+            String address;
+            int port;
+
+            ServerDetails(String address, int port) {
+                this.address = address;
+                this.port = port;
+            }
+        }
 
         public static void main(String[] args) {
             // Client identifier (can be IP, username, etc.)
@@ -40,37 +51,42 @@
             // Connect to the selected file server
             String address = selectedServer.getNode().getAddress();
             int port = selectedServer.getService().getPort();
+            connectedServerDetails.set(new ServerDetails(address, port));
+            startRegularHealthChecks();
             System.out.println("Client " + clientId + " connecting to server: " + address + ":" + port);
             String FilePath = "test.txt";
             sendFileToServer(address,port,FilePath);
             // Here, establish a connection to the server (e.g., via sockets)
         }
 
-//        private static void startRegularHealthChecks() {
-//            ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor();
-//            executor.scheduleAtFixedRate(() -> {
-//                // Assuming the health check endpoint is running on port 8081
-//                checkServerHealth("http://localhost:8081/health");
-//            }, 0, 10, TimeUnit.SECONDS);
-//        }
+        private static void startRegularHealthChecks() {
+            ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor();
+            executor.scheduleAtFixedRate(() -> {
+                ServerDetails serverDetails = connectedServerDetails.get();
+                if (serverDetails != null) {
+                    String healthCheckUrl = "http://" + serverDetails.address + ":" + (serverDetails.port+1000) + "/health";
+                    checkServerHealth(healthCheckUrl);
+                }
+            }, 0, 10, TimeUnit.SECONDS);
+        }
 
-//        private static void checkServerHealth(String urlString) {
-//            try {
-//                URL url = new URL(urlString);
-//                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-//                conn.setRequestMethod("GET");
-//                conn.connect();
-//
-//                int responseCode = conn.getResponseCode();
-//                if (responseCode != 200) {
-//                    System.out.println("Server health check failed");
-//                } else {
-//                    System.out.println("Server is healthy");
-//                }
-//            } catch (IOException e) {
-//                System.out.println("Failed to perform health check: " + e.getMessage());
-//            }
-//        }
+        private static void checkServerHealth(String urlString) {
+            try {
+                URL url = new URL(urlString);
+                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                conn.setRequestMethod("GET");
+                conn.connect();
+
+                int responseCode = conn.getResponseCode();
+                if (responseCode != 200) {
+                    System.out.println("Server health check failed");
+                } else {
+                    System.out.println("Server is healthy");
+                }
+            } catch (IOException e) {
+                System.out.println("Failed to perform health check: " + e.getMessage());
+            }
+        }
 
 
         private static void buildHashRing() {
@@ -78,12 +94,7 @@
             HealthClient healthClient = consul.healthClient();
             List<ServiceHealth> nodes = healthClient.getHealthyServiceInstances("file-server3").getResponse();
 
-//            for (ServiceHealth service : nodes) {
-//                if (service.getChecks().stream().allMatch(check -> check.getStatus().equals("passing"))) {
-//                    System.out.println("Active Service: " + service.getService().getId());
-//                    // Connect to the service here
-//                }
-//            }
+
             for (ServiceHealth node : nodes) {
                 int hash = hash(node.getService().getId());
 
