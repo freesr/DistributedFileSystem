@@ -115,23 +115,25 @@ public class FileServer {
     }
 
     private static void handleClient(Socket clientSocket) {
-         String SAVE_DIRECTORY = "../../../../Files"; // Directory to save received files
+        String SAVE_DIRECTORY = "Files"; // Directory to save received files
 
-        try (DataInputStream dataInputStream = new DataInputStream(clientSocket.getInputStream())) {
-            // Read the filename
-            String fileName = dataInputStream.readUTF();
-            File file = new File(SAVE_DIRECTORY + fileName);
+        try (DataInputStream dataInputStream = new DataInputStream(clientSocket.getInputStream());
+             DataOutputStream dataOutputStream = new DataOutputStream(clientSocket.getOutputStream())) {
 
-            // Read the file data
-            try (BufferedOutputStream fileOutputStream = new BufferedOutputStream(new FileOutputStream(file))) {
-                byte[] buffer = new byte[4096];
-                int bytesRead;
-                while ((bytesRead = dataInputStream.read(buffer)) != -1) {
-                    fileOutputStream.write(buffer, 0, bytesRead);
-                }
+            String command = dataInputStream.readUTF(); // Read the command (CREATE or UPLOAD)
+
+            switch (command) {
+                case "CREATE":
+                    handleFileCreation(dataInputStream, SAVE_DIRECTORY);
+                    dataOutputStream.writeUTF("File created successfully.");
+                    break;
+                case "UPLOAD":
+                    handleFileUpload(dataInputStream, SAVE_DIRECTORY);
+                    dataOutputStream.writeUTF("File uploaded successfully.");
+                    break;
+                default:
+                    dataOutputStream.writeUTF("Unknown command.");
             }
-
-            System.out.println("File received and saved: " + file.getAbsolutePath());
         } catch (IOException e) {
             System.out.println("Error handling client: " + e.getMessage());
             e.printStackTrace();
@@ -144,9 +146,43 @@ public class FileServer {
         }
     }
 
+    private static void handleFileUpload(DataInputStream dataInputStream, String saveDirectory) throws IOException {
+        String fileName = dataInputStream.readUTF();
+        File directory = new File(saveDirectory);
+        if (!directory.exists()) {
+            directory.mkdir();
+        }
+        File file = new File(directory, fileName);
+
+        try (BufferedOutputStream fileOutputStream = new BufferedOutputStream(new FileOutputStream(file))) {
+            byte[] buffer = new byte[4096];
+            int bytesRead;
+            while ((bytesRead = dataInputStream.read(buffer)) != -1) {
+                fileOutputStream.write(buffer, 0, bytesRead);
+            }
+        }
+
+        // replicateFileToNearestNodes(file); // Uncomment if replication logic is to be applied
+    }
+
+    private static void handleFileCreation(DataInputStream dataInputStream, String saveDirectory) throws IOException {
+        String fileName = dataInputStream.readUTF();
+        String fileContent = dataInputStream.readUTF();
+
+        File directory = new File(saveDirectory);
+        if (!directory.exists()) {
+            directory.mkdir();
+        }
+
+        File file = new File(directory, fileName);
+        try (BufferedWriter writer = new BufferedWriter(new FileWriter(file))) {
+            writer.write(fileContent);
+        }
+    }
+
     private static void replicateDataToNearestNodes(String data) {
         // Find the two nearest nodes
-        List<ServiceHealth> nearestNodes = findTwoNearestNodes();
+        List<ServiceHealth> nearestNodes = findNearestNodes();
 
         // Replicate data to these nodes
         for (ServiceHealth node : nearestNodes) {
@@ -155,7 +191,45 @@ public class FileServer {
         }
     }
 
-    private static List<ServiceHealth> findTwoNearestNodes() {
+
+    private static void replicateFileToNearestNodes(File file) {
+        List<ServiceHealth> nearestNodes = findNearestNodes();
+        for (ServiceHealth node : nearestNodes) {
+            // Replicate the file to each nearest node
+            //sendFileToNode(node, file);
+        }
+    }
+
+//    private static void sendFileToNode(ServiceHealth node, File file) {
+//        try {
+//            URL url = new URL("http://" + node.getService().getAddress() + ":" + node.getService().getPort() + "/replicate");
+//            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+//            conn.setDoOutput(true);
+//            conn.setRequestMethod("POST");
+//            conn.setRequestProperty("Content-Type", "application/octet-stream");
+//
+//            try (OutputStream os = conn.getOutputStream(); FileInputStream fis = new FileInputStream(file)) {
+//                byte[] buffer = new byte[4096];
+//                int bytesRead;
+//                while ((bytesRead = fis.read(buffer)) != -1) {
+//                    os.write(buffer, 0, bytesRead);
+//                }
+//            }
+//
+//            int responseCode = conn.getResponseCode();
+//            if (responseCode == HttpURLConnection.HTTP_OK) {
+//                System.out.println("File replicated to node: " + node.getService().getId());
+//            } else {
+//                System.out.println("Failed to replicate file to node: " + node.getService().getId());
+//            }
+//        } catch (IOException e) {
+//            System.out.println("Error replicating file to node: " + e.getMessage());
+//            e.printStackTrace();
+//        }
+//    }
+
+
+    private static List<ServiceHealth> findNearestNodes() {
         List<ServiceHealth> nearestNodes = new ArrayList<>();
         int currentServerHash =  hash(serverId);/* Your current server's hash value */;
         boolean firstNodeFound = false;
