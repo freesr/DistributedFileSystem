@@ -1,7 +1,9 @@
 package org.example;
+import com.google.gson.Gson;
 import com.orbitz.consul.AgentClient;
 import com.orbitz.consul.Consul;
 import com.orbitz.consul.HealthClient;
+import com.orbitz.consul.KeyValueClient;
 import com.orbitz.consul.model.agent.Registration;
 import com.orbitz.consul.model.health.ServiceHealth;
 import com.orbitz.consul.model.agent.ImmutableRegistration;
@@ -23,6 +25,39 @@ public class FileServer {
 
     private static volatile boolean running = true;
     static String serverId;
+    private static Map<String, FileMetadata> fileMetadataMap = new HashMap<>();
+
+
+    static class FileMetadata {
+        String fileName;
+        long fileSize;
+        Date creationDate;
+        Set<String> replicatedNodes;
+
+        FileMetadata(String fileName, long fileSize, Date creationDate) {
+            this.fileName = fileName;
+            this.fileSize = fileSize;
+            this.creationDate = creationDate;
+            this.replicatedNodes = new HashSet<>();
+        }
+
+        void addReplicatedNode(String nodeId) {
+            replicatedNodes.add(nodeId);
+        }
+
+        String toJson() {
+            Gson gson = new Gson();
+            return gson.toJson(this);
+        }
+
+        // Static method to convert JSON back to FileMetadata
+        static FileMetadata fromJson(String json) {
+            Gson gson = new Gson();
+            return gson.fromJson(json, FileMetadata.class);
+        }
+
+        // Additional methods as needed...
+    }
 
     public static void main(String[] args) {
         // Initialize the server (e.g., start listening on a socket)
@@ -44,11 +79,7 @@ public class FileServer {
 
         System.out.println("Server stopped.");
 
-
-
           buildHashRing();
-
-
 
     }
 
@@ -99,6 +130,22 @@ public class FileServer {
         }
 
     }
+    private static void updateFileMetadataInConsul(String fileName, FileMetadata metadata) {
+        Consul consul = Consul.builder().build();
+        KeyValueClient kvClient = consul.keyValueClient();
+
+        String metadataJson = metadata.toJson(); // Convert to JSON
+        kvClient.putValue("files/" + fileName, metadataJson);
+    }
+
+    private static FileMetadata getFileMetadataFromConsul(String fileName) {
+        Consul consul = Consul.builder().build();
+        KeyValueClient kvClient = consul.keyValueClient();
+
+        Optional<String> metadataJson = kvClient.getValueAsString("files/" + fileName);
+        return metadataJson.map(FileMetadata::fromJson).orElse(null);
+    }
+
 
 
 
@@ -154,6 +201,7 @@ public class FileServer {
         }
         File file = new File(directory, fileName);
 
+
         try (BufferedOutputStream fileOutputStream = new BufferedOutputStream(new FileOutputStream(file))) {
             byte[] buffer = new byte[4096];
             int bytesRead;
@@ -161,8 +209,10 @@ public class FileServer {
                 fileOutputStream.write(buffer, 0, bytesRead);
             }
         }
+        FileMetadata metadata = new FileMetadata(fileName, file.length(), new Date());
+        updateFileMetadataInConsul(fileName, metadata);
 
-        // replicateFileToNearestNodes(file); // Uncomment if replication logic is to be applied
+        replicateFileToNodes(file, metadata);
     }
 
     private static void handleFileCreation(DataInputStream dataInputStream, String saveDirectory) throws IOException {
@@ -180,53 +230,30 @@ public class FileServer {
         }
     }
 
-    private static void replicateDataToNearestNodes(String data) {
-        // Find the two nearest nodes
-        List<ServiceHealth> nearestNodes = findNearestNodes();
-
-        // Replicate data to these nodes
-        for (ServiceHealth node : nearestNodes) {
-            // Logic to replicate data to the node
-            // This could be an HTTP request, a socket connection, etc.
+    private static void replicateFileToNodes(File file, FileMetadata metadata) {
+        List<ServiceHealth> replicationNodes = selectReplicationNodes();
+        for (ServiceHealth node : replicationNodes) {
+            boolean success = sendFileToNode(node, file);
+            if (success) {
+                metadata.addReplicatedNode(node.getService().getId());
+                // Update metadata in Consul again after successful replication
+                updateFileMetadataInConsul(file.getName(), metadata);            }
         }
     }
 
 
-    private static void replicateFileToNearestNodes(File file) {
-        List<ServiceHealth> nearestNodes = findNearestNodes();
-        for (ServiceHealth node : nearestNodes) {
-            // Replicate the file to each nearest node
-            //sendFileToNode(node, file);
-        }
+    private static List<ServiceHealth> selectReplicationNodes() {
+        // Implement your logic to select nodes for replication
+        // This could consider factors like node load, storage capacity, etc.
+        return new ArrayList<>(); // Placeholder for actual implementation
     }
 
-//    private static void sendFileToNode(ServiceHealth node, File file) {
-//        try {
-//            URL url = new URL("http://" + node.getService().getAddress() + ":" + node.getService().getPort() + "/replicate");
-//            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-//            conn.setDoOutput(true);
-//            conn.setRequestMethod("POST");
-//            conn.setRequestProperty("Content-Type", "application/octet-stream");
-//
-//            try (OutputStream os = conn.getOutputStream(); FileInputStream fis = new FileInputStream(file)) {
-//                byte[] buffer = new byte[4096];
-//                int bytesRead;
-//                while ((bytesRead = fis.read(buffer)) != -1) {
-//                    os.write(buffer, 0, bytesRead);
-//                }
-//            }
-//
-//            int responseCode = conn.getResponseCode();
-//            if (responseCode == HttpURLConnection.HTTP_OK) {
-//                System.out.println("File replicated to node: " + node.getService().getId());
-//            } else {
-//                System.out.println("Failed to replicate file to node: " + node.getService().getId());
-//            }
-//        } catch (IOException e) {
-//            System.out.println("Error replicating file to node: " + e.getMessage());
-//            e.printStackTrace();
-//        }
-//    }
+    private static boolean sendFileToNode(ServiceHealth node, File file) {
+        // Implement logic to send file to the given node
+        // Return true if replication is successful, false otherwise
+        return true; // Placeholder for actual implementation
+    }
+
 
 
     private static List<ServiceHealth> findNearestNodes() {
