@@ -126,9 +126,10 @@
                 int responseCode = conn.getResponseCode();
                 if (responseCode != 200) {
                     System.out.println("Server health check failed");
-                } else {
-                    System.out.println("Server is healthy");
                 }
+//                else {
+//                    System.out.println("Server is healthy");
+//                }
             } catch (IOException e) {
                 System.out.println("Failed to perform health check: " + e.getMessage());
             }

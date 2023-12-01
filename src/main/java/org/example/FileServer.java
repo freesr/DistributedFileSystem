@@ -16,6 +16,7 @@ import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.*;
+import java.util.stream.Collectors;
 
 
 public class FileServer {
@@ -25,6 +26,8 @@ public class FileServer {
 
     private static volatile boolean running = true;
     static String serverId;
+    static String serviceName = "file-server3";
+    static int numberOfReplicas = 3;
     private static Map<String, FileMetadata> fileMetadataMap = new HashMap<>();
 
 
@@ -32,12 +35,14 @@ public class FileServer {
         String fileName;
         long fileSize;
         Date creationDate;
+        String serverId;
         Set<String> replicatedNodes;
 
-        FileMetadata(String fileName, long fileSize, Date creationDate) {
+        FileMetadata(String fileName, long fileSize, Date creationDate,String serverId) {
             this.fileName = fileName;
             this.fileSize = fileSize;
             this.creationDate = creationDate;
+            this.serverId = serverId;
             this.replicatedNodes = new HashSet<>();
         }
 
@@ -67,7 +72,7 @@ public class FileServer {
         int port = Integer.parseInt(args[1]);       // Port number as a command line argument
 
         // Register with Consul
-        registerServiceWithConsul(serverId, "file-server3", port);
+        registerServiceWithConsul(serverId, serviceName , port);
         try {
             startServer(port);
         } catch (IOException e) {
@@ -83,17 +88,6 @@ public class FileServer {
 
     }
 
-    private static void startHealthCheckEndpoint(int port) {
-        try {
-            HttpServer server = HttpServer.create(new InetSocketAddress(port+1000), 0);
-            server.createContext("/health", new HealthCheckHandler());
-            server.setExecutor(null); // creates a default executor
-            server.start();
-            System.out.println("Health check endpoint running on port " + (8081));
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
-    }
 
     static class HealthCheckHandler implements HttpHandler {
         @Override
@@ -135,14 +129,14 @@ public class FileServer {
         KeyValueClient kvClient = consul.keyValueClient();
 
         String metadataJson = metadata.toJson(); // Convert to JSON
-        kvClient.putValue("files/" + fileName, metadataJson);
+        kvClient.putValue( fileName, metadataJson);
     }
 
     private static FileMetadata getFileMetadataFromConsul(String fileName) {
         Consul consul = Consul.builder().build();
         KeyValueClient kvClient = consul.keyValueClient();
 
-        Optional<String> metadataJson = kvClient.getValueAsString("files/" + fileName);
+        Optional<String> metadataJson = kvClient.getValueAsString( fileName);
         return metadataJson.map(FileMetadata::fromJson).orElse(null);
     }
 
@@ -162,7 +156,14 @@ public class FileServer {
     }
 
     private static void handleClient(Socket clientSocket) {
-        String SAVE_DIRECTORY = "Files"; // Directory to save received files
+        String SAVE_DIRECTORY = "Files/"+serverId;
+        File serverDirectory = new File(SAVE_DIRECTORY);
+        if(!serverDirectory.exists()){
+            boolean wasSuccessful = serverDirectory.mkdirs();
+            if (!wasSuccessful) {
+                System.out.println("Failed to create directory: " + serverDirectory);
+            }
+        }
 
         try (DataInputStream dataInputStream = new DataInputStream(clientSocket.getInputStream());
              DataOutputStream dataOutputStream = new DataOutputStream(clientSocket.getOutputStream())) {
@@ -178,6 +179,10 @@ public class FileServer {
                     handleFileUpload(dataInputStream, SAVE_DIRECTORY);
                     dataOutputStream.writeUTF("File uploaded successfully.");
                     break;
+                case "REPLICATE":
+                    handleFileReplicate(dataInputStream, SAVE_DIRECTORY);
+                    dataOutputStream.writeUTF("File Replication successfully.");
+                    break;
                 default:
                     dataOutputStream.writeUTF("Unknown command.");
             }
@@ -191,6 +196,26 @@ public class FileServer {
                 System.out.println("Error closing client socket: " + e.getMessage());
             }
         }
+    }
+
+    private static void handleFileReplicate(DataInputStream dataInputStream, String saveDirectory) throws IOException{
+        String fileName = dataInputStream.readUTF();
+        File directory = new File(saveDirectory);
+        if (!directory.exists()) {
+            directory.mkdir();
+        }
+        File file = new File(directory, fileName);
+
+
+        try (BufferedOutputStream fileOutputStream = new BufferedOutputStream(new FileOutputStream(file))) {
+            byte[] buffer = new byte[4096];
+            int bytesRead;
+            while ((bytesRead = dataInputStream.read(buffer)) != -1) {
+                fileOutputStream.write(buffer, 0, bytesRead);
+            }
+        }
+//        FileMetadata metadata = new FileMetadata(fileName, file.length(), new Date());
+//        updateFileMetadataInConsul(fileName, metadata);
     }
 
     private static void handleFileUpload(DataInputStream dataInputStream, String saveDirectory) throws IOException {
@@ -209,10 +234,10 @@ public class FileServer {
                 fileOutputStream.write(buffer, 0, bytesRead);
             }
         }
-        FileMetadata metadata = new FileMetadata(fileName, file.length(), new Date());
+        FileMetadata metadata = new FileMetadata(fileName, file.length(), new Date(),serverId);
         updateFileMetadataInConsul(fileName, metadata);
 
-        replicateFileToNodes(file, metadata);
+        replicateFileToNodes(file,fileName, metadata);
     }
 
     private static void handleFileCreation(DataInputStream dataInputStream, String saveDirectory) throws IOException {
@@ -228,12 +253,15 @@ public class FileServer {
         try (BufferedWriter writer = new BufferedWriter(new FileWriter(file))) {
             writer.write(fileContent);
         }
+        FileMetadata metadata = new FileMetadata(fileName, file.length(), new Date(),serverId);
+        updateFileMetadataInConsul(fileName, metadata);
+        replicateFileToNodes(file,fileName, metadata);
     }
 
-    private static void replicateFileToNodes(File file, FileMetadata metadata) {
+    private static void replicateFileToNodes(File file,String fileName, FileMetadata metadata) {
         List<ServiceHealth> replicationNodes = selectReplicationNodes();
         for (ServiceHealth node : replicationNodes) {
-            boolean success = sendFileToNode(node, file);
+            boolean success = sendFileToNode(node, fileName, file);
             if (success) {
                 metadata.addReplicatedNode(node.getService().getId());
                 // Update metadata in Consul again after successful replication
@@ -243,14 +271,52 @@ public class FileServer {
 
 
     private static List<ServiceHealth> selectReplicationNodes() {
-        // Implement your logic to select nodes for replication
-        // This could consider factors like node load, storage capacity, etc.
-        return new ArrayList<>(); // Placeholder for actual implementation
-    }
 
-    private static boolean sendFileToNode(ServiceHealth node, File file) {
-        // Implement logic to send file to the given node
-        // Return true if replication is successful, false otherwise
+            Consul consul = Consul.builder().build();
+            HealthClient healthClient = consul.healthClient();
+
+            // Fetch all healthy service instances
+            List<ServiceHealth> nodes = healthClient.getHealthyServiceInstances(serviceName).getResponse();
+
+            // Shuffle and select a subset for replication
+        nodes = nodes.stream()
+                .filter(node -> !node.getService().getId().equals(serverId))
+                .collect(Collectors.toList());
+
+        // Shuffle and select a subset for replication
+        Collections.shuffle(nodes);
+        return nodes.stream().limit(Math.min(numberOfReplicas, nodes.size())).collect(Collectors.toList());
+        }
+
+
+
+    private static boolean sendFileToNode(ServiceHealth node,String fileName, File file) {
+        if (!file.exists()) {
+            System.out.println("File does not exist: " );
+            return false;
+        }
+
+
+        try (Socket socket = new Socket(node.getNode().getAddress(),node.getService().getPort() );
+             DataOutputStream dataOutputStream = new DataOutputStream(socket.getOutputStream());
+             BufferedInputStream fileInputStream = new BufferedInputStream(new FileInputStream(file))) {
+
+            // Send the command and the filename
+            dataOutputStream.writeUTF("REPLICATE");
+            dataOutputStream.writeUTF(fileName);
+
+            // Send the file data
+            byte[] buffer = new byte[4096];
+            int bytesRead;
+            while ((bytesRead = fileInputStream.read(buffer)) != -1) {
+                dataOutputStream.write(buffer, 0, bytesRead);
+            }
+
+            System.out.println("File has sent replication  " + fileName);
+        } catch (IOException e) {
+            System.out.println("Error occurred: " + e.getMessage());
+            e.printStackTrace();
+        }
         return true; // Placeholder for actual implementation
     }
 
