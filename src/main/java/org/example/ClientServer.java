@@ -56,7 +56,7 @@
             try (Scanner in = new Scanner(System.in)) {
                 while (true) {
                     System.out.println("____________________\n");
-                    System.out.println("Choose the operation \n 1.Upload Existing file \n 2.Create new file \n 0.Exit");
+                    System.out.println("Choose the operation \n 1.Upload Existing file \n 2.Create new file \n 3.Read file \n 4.Write to file \n 0.Exit");
                     userOperation = in.nextLine();
                     if (userOperation.equals("1")) {
                         System.out.println("Enter File Path");
@@ -76,6 +76,21 @@
                         }
                         String fileContent = fileContentBuilder.toString();
                         sendNewFileToServer(address, port, fileName, fileContent);
+                    } else if (userOperation.equals("3")) {
+                        System.out.println("Enter the name of the file to read:");
+                        String fileName = in.nextLine();
+                        readFileFromServer(address, port, fileName);
+                    } else if (userOperation.equals("4")) {
+                        System.out.println("Enter the name of the file to write to:");
+                        String fileName = in.nextLine();
+                        System.out.println("Enter the new content for the file (end input with a single line containing 'END'):");
+                        StringBuilder fileContentBuilder = new StringBuilder();
+                        String line;
+                        while (!(line = in.nextLine()).equals("END")) {
+                            fileContentBuilder.append(line).append("\n");
+                        }
+                        String fileContent = fileContentBuilder.toString();
+                        writeFileToServer(address, port, fileName, fileContent);
                     } else if (userOperation.equals("0")) {
                         System.out.println("Closing application");
                         System.exit(0);
@@ -83,6 +98,48 @@
                 }
             }
         }
+
+        private static void readFileFromServer(String serverAddress, int serverPort, String fileName) {
+            try (Socket socket = new Socket(serverAddress, serverPort);
+                 DataOutputStream out = new DataOutputStream(socket.getOutputStream());
+                 DataInputStream in = new DataInputStream(socket.getInputStream())) {
+
+                out.writeUTF("READ");
+                out.writeUTF(fileName);
+
+                int fileLength = in.readInt();
+                if (fileLength > 0) {
+                    byte[] fileContent = new byte[fileLength];
+                    in.readFully(fileContent);
+                    System.out.println("File content:\n" + new String(fileContent));
+                } else {
+                    System.out.println("File not found or empty.");
+                }
+            } catch (IOException e) {
+                System.out.println("Error occurred: " + e.getMessage());
+                e.printStackTrace();
+            }
+        }
+
+        private static void writeFileToServer(String serverAddress, int serverPort, String fileName, String fileContent) {
+            try (Socket socket = new Socket(serverAddress, serverPort);
+                 DataOutputStream out = new DataOutputStream(socket.getOutputStream());
+                 BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()))) {
+
+                out.writeUTF("WRITE");
+                out.writeUTF(fileName);
+                byte[] contentBytes = fileContent.getBytes();
+                out.writeInt(contentBytes.length);
+                out.write(contentBytes);
+
+                System.out.println("Server says: " + in.readLine());
+            } catch (IOException e) {
+                System.out.println("Error occurred: " + e.getMessage());
+                e.printStackTrace();
+            }
+        }
+
+
 
         private static void setupServiceWatcher() {
             Consul consul = Consul.builder().withReadTimeoutMillis(11000).build();
@@ -144,7 +201,6 @@
 
             for (ServiceHealth node : nodes) {
                 int hash = hash(node.getService().getId());
-
                 hashRing.put(hash, node);
             }
         }

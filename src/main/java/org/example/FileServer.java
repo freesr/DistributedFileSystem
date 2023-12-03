@@ -15,6 +15,7 @@ import java.io.*;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.nio.file.Files;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -37,6 +38,9 @@ public class FileServer {
         Date creationDate;
         String serverId;
         Set<String> replicatedNodes;
+        String lesseeServerId;
+        long leaseExpiryTime;
+        boolean isLeased;
 
         FileMetadata(String fileName, long fileSize, Date creationDate,String serverId) {
             this.fileName = fileName;
@@ -129,14 +133,14 @@ public class FileServer {
         KeyValueClient kvClient = consul.keyValueClient();
 
         String metadataJson = metadata.toJson(); // Convert to JSON
-        kvClient.putValue( fileName, metadataJson);
+        kvClient.putValue("files/" + fileName, metadataJson);
     }
 
     private static FileMetadata getFileMetadataFromConsul(String fileName) {
         Consul consul = Consul.builder().build();
         KeyValueClient kvClient = consul.keyValueClient();
 
-        Optional<String> metadataJson = kvClient.getValueAsString( fileName);
+        Optional<String> metadataJson = kvClient.getValueAsString("files/"+ fileName);
         return metadataJson.map(FileMetadata::fromJson).orElse(null);
     }
 
@@ -183,6 +187,15 @@ public class FileServer {
                     handleFileReplicate(dataInputStream, SAVE_DIRECTORY);
                     dataOutputStream.writeUTF("File Replication successfully.");
                     break;
+                case "READ":
+                    handleReadRequest(dataInputStream, dataOutputStream);
+                    break;
+                case "WRITE":
+                    handleWriteRequest(dataInputStream, dataOutputStream);
+                    break;
+                case "READFROMSERVER":
+                    handleReadFromServerRequest(dataInputStream,dataOutputStream);
+                    break;
                 default:
                     dataOutputStream.writeUTF("Unknown command.");
             }
@@ -195,6 +208,21 @@ public class FileServer {
             } catch (IOException e) {
                 System.out.println("Error closing client socket: " + e.getMessage());
             }
+        }
+    }
+
+
+    private static void handleReadFromServerRequest(DataInputStream dataInputStream, DataOutputStream dataOutputStream) throws IOException {
+        String fileName = dataInputStream.readUTF();
+        File file = new File("Files/" + serverId, fileName);
+
+        if (file.exists()) {
+            // Send file content back to the requester
+            byte[] fileContent = Files.readAllBytes(file.toPath());
+            dataOutputStream.writeInt(fileContent.length);
+            dataOutputStream.write(fileContent);
+        } else {
+            dataOutputStream.writeInt(0); // Indicate file not found
         }
     }
 
@@ -217,6 +245,163 @@ public class FileServer {
 //        FileMetadata metadata = new FileMetadata(fileName, file.length(), new Date());
 //        updateFileMetadataInConsul(fileName, metadata);
     }
+
+    private static void handleReplicationRequest(String fileName, String mode, long leasePeriod) {
+        FileMetadata metadata = getFileMetadataFromConsul(fileName);
+        if (metadata.isLeased) {
+            // Handle already leased file
+        } else {
+            if (mode.equals("WRITE")) {
+                // Grant lease
+                metadata.lesseeServerId = serverId;
+                metadata.leaseExpiryTime = System.currentTimeMillis() + leasePeriod;
+                metadata.isLeased = true;
+                updateFileMetadataInConsul(fileName, metadata);
+                // Replicate file locally
+            } else {
+                // Replicate file locally for read-only mode
+            }
+        }
+    }
+
+    private static void handleWriteOperation(String fileName, String fileContent) {
+        FileMetadata metadata = getFileMetadataFromConsul(fileName);
+        if (metadata.lesseeServerId.equals(serverId) && metadata.isLeased) {
+            // Perform write operation
+            // After writing, notify the owner server to commit changes
+        }
+    }
+
+    private static void commitChanges(String fileName) {
+        FileMetadata metadata = getFileMetadataFromConsul(fileName);
+        // Update all replicas
+        // Update metadata to reflect the new state
+    }
+
+    private static void checkLeaseExpiry() {
+        // Periodically check for lease expiry
+        // Invalidate changes if the lease has expired
+    }
+
+    private static void handleReadRequest(DataInputStream dataInputStream, DataOutputStream dataOutputStream) throws IOException {
+        String fileName = dataInputStream.readUTF();
+        File localFile = new File("Files/" + serverId, fileName);
+
+        // Check if file exists locally
+        if (!localFile.exists()) {
+            FileMetadata metadata = getFileMetadataFromConsul(fileName);
+
+            // Check if file metadata exists and file is on another server
+            if (metadata != null && !metadata.serverId.equals(serverId)) {
+                // Fetch file from the server where it's located
+                try {
+                    fetchFileFromServer(metadata.serverId, fileName, localFile,dataOutputStream);
+                } catch (Exception e) {
+                    System.out.println("Failed to fetch file from other server: " + e.getMessage());
+                    dataOutputStream.writeInt(0); // Indicate file not found or error
+                    return;
+                }
+            }
+        }
+
+    }
+
+    private static void sendReadToServer(String fileName,DataOutputStream dataOutputStream) throws IOException{
+        File localFile = new File("Files/" + serverId, fileName);
+        if (localFile.exists() && isFileReady(localFile)) {
+            byte[] fileContent = Files.readAllBytes(localFile.toPath());
+            dataOutputStream.writeInt(fileContent.length);
+            dataOutputStream.write(fileContent);
+        } else {
+            dataOutputStream.writeInt(0); // Indicate file not found
+        }
+    }
+
+    private static boolean isFileReady(File file) {
+        try {
+            // Try to open a random access file in "rw" mode
+            RandomAccessFile raf = new RandomAccessFile(file, "rw");
+            raf.close();
+            return true;
+        } catch (FileNotFoundException e) {
+            // If caught, the file is being used by another process
+            return false;
+        } catch (IOException e) {
+            System.out.println("IOException: " + e.getMessage());
+            return false;
+        }
+    }
+
+
+    private static void fetchFileFromServer(String serverId, String fileName, File localFile,DataOutputStream dataOutputStream) throws IOException {
+        // Fetch the server details (IP address and port) from Consul
+        ServiceHealth server = getServerDetailsFromConsul(serverId);
+        String serverAddress = server.getNode().getAddress();
+        int serverPort = server.getService().getPort();
+
+        // Connect to the server and request the file
+        try (Socket socket = new Socket(serverAddress, serverPort);
+             DataOutputStream out = new DataOutputStream(socket.getOutputStream());
+             DataInputStream in = new DataInputStream(socket.getInputStream())) {
+
+            out.writeUTF("READFROMSERVER");
+            out.writeUTF(fileName);
+
+            int fileLength = in.readInt();
+            if (fileLength > 0) {
+                byte[] fileContent = new byte[fileLength];
+                in.readFully(fileContent);
+                Files.write(localFile.toPath(), fileContent);
+                sendReadToServer(fileName,dataOutputStream);
+            } else {
+                throw new IOException("File not found on remote server");
+            }
+        }
+    }
+
+    private static ServiceHealth getServerDetailsFromConsul(String serverId) {
+        Consul consul = Consul.builder().build();
+        HealthClient healthClient = consul.healthClient();
+
+        // Query for all healthy instances of the service
+        List<ServiceHealth> nodes = healthClient.getHealthyServiceInstances("file-server3").getResponse();
+
+        // Search for the server with the given ID
+        Optional<ServiceHealth> matchingServer = nodes.stream()
+                .filter(node -> node.getService().getId().equals(serverId))
+                .findFirst();
+
+        if (matchingServer.isPresent()) {
+            return matchingServer.get();
+        } else {
+            throw new RuntimeException("Server with ID " + serverId + " not found in Consul.");
+        }
+    }
+
+    private static void handleWriteRequest(DataInputStream dataInputStream, DataOutputStream dataOutputStream) throws IOException {
+//        String fileName = dataInputStream.readUTF();
+//        int fileLength = dataInputStream.readInt();
+//        byte[] fileContent = new byte[fileLength];
+//        dataInputStream.readFully(fileContent);
+//
+//        FileMetadata metadata = getFileMetadataFromConsul(fileName);
+//        if (metadata != null && canWriteToFile(metadata)) {
+//            File file = new File("Files/" + serverId, fileName);
+//            Files.write(file.toPath(), fileContent);
+//
+//            // Update metadata and replicate changes if necessary
+//            // ...
+//
+//            dataOutputStream.writeUTF("Write successful");
+//        } else {
+//            dataOutputStream.writeUTF("Write failed: No lease or file not found");
+//        }
+    }
+
+
+
+
+
 
     private static void handleFileUpload(DataInputStream dataInputStream, String saveDirectory) throws IOException {
         String fileName = dataInputStream.readUTF();
