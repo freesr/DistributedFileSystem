@@ -10,6 +10,8 @@
     import java.net.Socket;
     import java.net.URL;
     import java.net.UnknownHostException;
+    import java.nio.file.Files;
+    import java.nio.file.Path;
     import java.util.*;
     import java.util.concurrent.atomic.AtomicReference;
     import java.util.concurrent.Executors;
@@ -83,14 +85,7 @@
                     } else if (userOperation.equals("4")) {
                         System.out.println("Enter the name of the file to write to:");
                         String fileName = in.nextLine();
-                        System.out.println("Enter the new content for the file (end input with a single line containing 'END'):");
-                        StringBuilder fileContentBuilder = new StringBuilder();
-                        String line;
-                        while (!(line = in.nextLine()).equals("END")) {
-                            fileContentBuilder.append(line).append("\n");
-                        }
-                        String fileContent = fileContentBuilder.toString();
-                        writeFileToServer(address, port, fileName, fileContent);
+                        requestWriteToFile(address, port, fileName);
                     } else if (userOperation.equals("0")) {
                         System.out.println("Closing application");
                         System.exit(0);
@@ -107,6 +102,7 @@
                 out.writeUTF("READ");
                 out.writeUTF(fileName);
 
+                String response = in.readUTF();
                 int fileLength = in.readInt();
                 if (fileLength > 0) {
                     byte[] fileContent = new byte[fileLength];
@@ -121,45 +117,72 @@
             }
         }
 
-        private static void writeFileToServer(String serverAddress, int serverPort, String fileName, String fileContent) {
-            try (Socket socket = new Socket(serverAddress, serverPort);
-                 DataOutputStream out = new DataOutputStream(socket.getOutputStream());
-                 BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()))) {
+        private static void requestWriteToFile(String serverAddress, int serverPort, String fileName) {
+            Socket socket = null;
+            DataOutputStream out = null;
+            DataInputStream in = null;
+            Path tempFilePath = null;
+            try {
+                socket = new Socket(serverAddress, serverPort);
+                out = new DataOutputStream(socket.getOutputStream());
+                in = new DataInputStream(socket.getInputStream());
 
                 out.writeUTF("WRITE");
                 out.writeUTF(fileName);
-                byte[] contentBytes = fileContent.getBytes();
-                out.writeInt(contentBytes.length);
-                out.write(contentBytes);
 
-                System.out.println("Server says: " + in.readLine());
-            } catch (IOException e) {
-                System.out.println("Error occurred: " + e.getMessage());
+                String response = in.readUTF();
+                if ("File not available for lease".equals(response)) {
+                    System.out.println("File is currently not available for writing.");
+                    return;
+                }
+
+                int fileSize = in.readInt();
+                if (fileSize <= 0) {
+                    System.out.println("Received an empty file or file not found.");
+                    return;
+                }
+
+                byte[] fileContent = new byte[fileSize];
+                in.readFully(fileContent);
+
+                tempFilePath = Files.createTempFile("editfile_", ".tmp");
+                Files.write(tempFilePath, fileContent);
+
+                editFile(tempFilePath.toString());
+
+                byte[] editedContent = Files.readAllBytes(tempFilePath);
+                sendEditedContentToServer(out, fileName, new String(editedContent));
+            } catch (IOException | InterruptedException e) {
+                System.out.println("Error: " + e.getMessage());
                 e.printStackTrace();
+            } finally {
+                try {
+                    if (tempFilePath != null) Files.delete(tempFilePath);
+                    if (in != null) in.close();
+                    if (out != null) out.close();
+                    if (socket != null && !socket.isClosed()) socket.close();
+                } catch (IOException ex) {
+                    ex.printStackTrace();
+                }
             }
         }
 
-
-
-        private static void setupServiceWatcher() {
-            Consul consul = Consul.builder().withReadTimeoutMillis(11000).build();
-            HealthClient healthClient = consul.healthClient();
-            ServiceHealthCache healthCache = ServiceHealthCache.newCache(healthClient, SERVICE_NAME);
-
-            healthCache.addListener(newValues -> {
-                System.out.println("Service change detected!");
-                // Handle service changes, e.g., rebuilding the hash ring or notifying the user
-                buildHashRing();
-            });
-
-            try {
-                healthCache.start();
-            } catch (Exception e) {
-                e.printStackTrace();
-            }
+        private static void editFile(String filePath) throws IOException, InterruptedException {
+            // Replace "nano" with the command for your preferred editor
+            ProcessBuilder processBuilder = new ProcessBuilder("notepad", filePath);
+            Process process = processBuilder.inheritIO().start();
+            process.waitFor();
         }
 
+        private static void sendEditedContentToServer(DataOutputStream out, String fileName, String editedContent) throws IOException {
+            out.writeUTF("EDITED_CONTENT");
+            //out.writeUTF(fileName);
+            byte[] contentBytes = editedContent.getBytes();
+            out.writeInt(contentBytes.length);
+            out.write(contentBytes);
+            System.out.println("Edited content sent to server.");
 
+        }
 
         private static void startRegularHealthChecks() {
             ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor();
