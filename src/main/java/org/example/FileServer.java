@@ -15,7 +15,6 @@ import java.io.*;
 import java.net.*;
 import java.nio.file.Files;
 import java.util.*;
-
 import java.util.stream.Collectors;
 
 
@@ -23,7 +22,6 @@ public class FileServer {
 
     private static final int SERVER_PORT = 8080; // Example port
     private static final NavigableMap<Integer, ServiceHealth> hashRing = new TreeMap<>();
-
     private static volatile boolean running = true;
     static String serverId;
     static String serviceName = "file-server3";
@@ -42,9 +40,6 @@ public class FileServer {
         boolean isLeased;
         String leasedBy;
         long leaseExpiryTime;
-
-
-
 
         FileMetadata(String fileName, long fileSize, Date creationDate,String serverId) {
             this.fileName = fileName;
@@ -71,7 +66,6 @@ public class FileServer {
             return gson.fromJson(json, FileMetadata.class);
         }
 
-        // Additional methods as needed...
     }
 
     public static void main(String[] args) {
@@ -94,7 +88,6 @@ public class FileServer {
         System.out.println("Server stopped.");
 
           buildHashRing();
-
     }
 
     private static boolean tryAcquireLease(String fileName, String serverId) {
@@ -242,6 +235,14 @@ public class FileServer {
                 case "EDITED_CONTENT":
                     handleEditedContent(dataInputStream, dataOutputStream);
                     break;
+                case "DELETE":
+                    fileName = dataInputStream.readUTF();
+                    handleFileDeletion(dataOutputStream, fileName);
+                    break;
+                case "DELETE_REPLICA":
+                    String replicaFileName = dataInputStream.readUTF();
+                    deleteLocalFile(replicaFileName); // You can reuse or modify the file deletion logic here
+                    break;
                 default:
                     dataOutputStream.writeUTF("Unknown command.");
             }
@@ -372,6 +373,14 @@ public class FileServer {
             System.out.println("File updated successfully: " + fileName);
         }
     }
+    private static void deleteLocalFile(String fileName) {
+        File file = new File("Files/" + serverId, fileName);
+        if (file.exists()) {
+            if (!file.delete()) {
+                System.out.println("Failed to delete replica: " + fileName);
+            }
+        }
+    }
 
     private static void fetchFileFromServer(String serverId, String fileName, File localFile,DataOutputStream dataOutputStream,DataInputStream dataInputStream,String mode) throws IOException {
         // Fetch the server details (IP address and port) from Consul
@@ -440,6 +449,46 @@ public class FileServer {
         replicateFileToNodes(file,fileName, metadata);
     }
 
+
+    private static void handleFileDeletion(DataOutputStream dataOutputStream, String fileName) throws IOException {
+        File file = new File("Files/" + serverId, fileName);
+        if (file.exists()) {
+            boolean deleteSuccess = file.delete();
+
+            FileMetadata metadata = getFileMetadataFromConsul(fileName);
+            if (metadata != null) {
+                metadata.replicatedNodes.forEach(nodeId -> deleteReplicaOnNode(nodeId, fileName));
+                kvClient.deleteKey("files/" + fileName); // Also delete metadata from Consul
+            }
+
+            if (deleteSuccess) {
+                dataOutputStream.writeUTF("File and its replicas deleted successfully.");
+            } else {
+                dataOutputStream.writeUTF("Failed to delete the file.");
+            }
+        } else {
+            dataOutputStream.writeUTF("File not found.");
+        }
+    }
+
+    private static void deleteReplicaOnNode(String nodeId, String fileName) {
+        ServiceHealth node = getServerDetailsFromConsul(nodeId);
+        String nodeAddress = node.getNode().getAddress();
+        int nodePort = node.getService().getPort();
+
+        try (Socket socket = new Socket(nodeAddress, nodePort);
+             DataOutputStream out = new DataOutputStream(socket.getOutputStream())) {
+
+            out.writeUTF("DELETE_REPLICA");
+            out.writeUTF(fileName);
+        } catch (IOException e) {
+            System.out.println("Error occurred while deleting replica on node " + nodeId + ": " + e.getMessage());
+        }
+    }
+
+
+
+
     private static void handleFileCreation(DataInputStream dataInputStream, String saveDirectory) throws IOException {
         String fileName = dataInputStream.readUTF();
         String fileContent = dataInputStream.readUTF();
@@ -486,7 +535,22 @@ public class FileServer {
         // Shuffle and select a subset for replication
         Collections.shuffle(nodes);
         return nodes.stream().limit(Math.min(numberOfReplicas, nodes.size())).collect(Collectors.toList());
+    }
+
+    private static void updateFileCountInConsul(String serverId, boolean increment) {
+        String key = "server-file-count/" + serverId;
+        int currentCount = 0;
+        Optional<String> currentValue = kvClient.getValueAsString(key);
+
+        if (currentValue.isPresent()) {
+            currentCount = Integer.parseInt(currentValue.get());
         }
+
+        currentCount = increment ? currentCount + 1 : currentCount - 1;
+        kvClient.putValue(key, String.valueOf(currentCount));
+    }
+
+
 
 
 
@@ -519,7 +583,6 @@ public class FileServer {
         }
         return true; // Placeholder for actual implementation
     }
-
 
 
     private static List<ServiceHealth> findNearestNodes() {

@@ -58,7 +58,7 @@
             try (Scanner in = new Scanner(System.in)) {
                 while (true) {
                     System.out.println("____________________\n");
-                    System.out.println("Choose the operation \n 1.Upload Existing file \n 2.Create new file \n 3.Read file \n 4.Write to file \n 0.Exit");
+                    System.out.println("Choose the operation \n 1.Upload Existing file \n 2.Create new file \n 3.Read file \n 4.Write to file \n 5.Delete File \n 0.Exit");
                     userOperation = in.nextLine();
                     if (userOperation.equals("1")) {
                         System.out.println("Enter File Path");
@@ -86,6 +86,10 @@
                         System.out.println("Enter the name of the file to write to:");
                         String fileName = in.nextLine();
                         requestWriteToFile(address, port, fileName);
+                    } else if (userOperation.equals("5")) {
+                        System.out.println("Enter the name of the file to delete:");
+                        String fileName = in.nextLine();
+                        deleteFileOnServer(address, port, fileName);
                     } else if (userOperation.equals("0")) {
                         System.out.println("Closing application");
                         System.exit(0);
@@ -117,6 +121,22 @@
             }
         }
 
+        // Method to delete a file on the server
+        private static void deleteFileOnServer(String serverAddress, int serverPort, String fileName) {
+            try (Socket socket = new Socket(serverAddress, serverPort);
+                 DataOutputStream out = new DataOutputStream(socket.getOutputStream())) {
+
+                out.writeUTF("DELETE");
+                out.writeUTF(fileName);
+
+                System.out.println("Request sent to delete file: " + fileName);
+            } catch (IOException e) {
+                System.out.println("Error occurred: " + e.getMessage());
+                e.printStackTrace();
+            }
+        }
+
+
         private static void requestWriteToFile(String serverAddress, int serverPort, String fileName) {
             Socket socket = null;
             DataOutputStream out = null;
@@ -131,7 +151,8 @@
                 out.writeUTF(fileName);
 
                 String response = in.readUTF();
-                if ("File not available for lease".equals(response)) {
+                System.out.println(response);
+                if ("Lease not acquired. File is currently locked.".equals(response)) {
                     System.out.println("File is currently not available for writing.");
                     return;
                 }
