@@ -58,7 +58,7 @@
             try (Scanner in = new Scanner(System.in)) {
                 while (true) {
                     System.out.println("____________________\n");
-                    System.out.println("Choose the operation \n 1.Upload Existing file \n 2.Create new file \n 3.Read file \n 4.Write to file \n 5.Delete File \n 0.Exit");
+                    System.out.println("Choose the operation \n 1.Upload Existing file \n 2.Create new file \n 3.Read file \n 4.Write to file \n 5.Delete File 6.File Open,Seek and Close \n 0.Exit");
                     userOperation = in.nextLine();
                     if (userOperation.equals("1")) {
                         System.out.println("Enter File Path");
@@ -90,13 +90,56 @@
                         System.out.println("Enter the name of the file to delete:");
                         String fileName = in.nextLine();
                         deleteFileOnServer(address, port, fileName);
+                    } else if (userOperation.equals("6")) {
+                        System.out.println("Enter the name of the file to open:");
+                        String fileName = in.nextLine();
+                        requestServerToOpenFile(address, port, fileName);
+
                     } else if (userOperation.equals("0")) {
                         System.out.println("Closing application");
                         System.exit(0);
+                    } else{
+                        System.out.println("Invalid Input. Try Again");
                     }
                 }
             }
         }
+
+        private static void requestServerToOpenFile(String serverAddress, int serverPort, String fileName) {
+            try (Socket socket = new Socket(serverAddress, serverPort);
+                 DataOutputStream out = new DataOutputStream(socket.getOutputStream());
+                 DataInputStream in = new DataInputStream(socket.getInputStream());
+                 Scanner sc = new Scanner(System.in)) {
+
+                out.writeUTF("OPEN");
+                out.writeUTF(fileName);
+
+                String response = in.readUTF();
+                boolean isFileOpen = "FILE OPENED".equals(response);
+                while (isFileOpen) {
+                    System.out.println("Enter the seek position (Integer) or type CLOSE to close the file:");
+                    String input = sc.nextLine().trim();
+                    if ("CLOSE".equals(input)) {
+                        out.writeUTF("CLOSE");
+                        isFileOpen = false;
+                    } else {
+                        try {
+                            int seekPosition = Integer.parseInt(input);
+                            out.writeUTF("SEEK");
+                            out.writeInt(seekPosition);
+                            System.out.println(in.readUTF());
+                        } catch (NumberFormatException e) {
+                            System.out.println("Invalid input. Please enter a valid integer.");
+                        }
+                    }
+                }
+                System.out.println("File Closed");
+            } catch (IOException e) {
+                System.out.println("Error occurred: " + e.getMessage());
+                e.printStackTrace();
+            }
+        }
+
 
         private static void readFileFromServer(String serverAddress, int serverPort, String fileName) {
             try (Socket socket = new Socket(serverAddress, serverPort);

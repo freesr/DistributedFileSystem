@@ -306,6 +306,10 @@ public class FileServer {
                     String replicaFileName = dataInputStream.readUTF();
                     deleteLocalFile(replicaFileName); // You can reuse or modify the file deletion logic here
                     break;
+                case "OPEN":
+                    fileName = dataInputStream.readUTF();
+                    handleReadRequest(dataInputStream, dataOutputStream,fileName,"OPEN");
+                    break;
                 default:
                     dataOutputStream.writeUTF("Unknown command.");
             }
@@ -319,6 +323,9 @@ public class FileServer {
                 System.out.println("Error closing client socket: " + e.getMessage());
             }
         }
+    }
+
+    private static void handleOpenRequest(DataInputStream dataInputStream, DataOutputStream dataOutputStream, String fileName) {
     }
 
     private static void handleEditedContent(DataInputStream dataInputStream, DataOutputStream dataOutputStream) throws IOException {
@@ -447,15 +454,45 @@ public class FileServer {
     private static void sendReadToServer(String fileName,DataOutputStream dataOutputStream,DataInputStream dataInputStream, String mode) throws IOException{
         File localFile = new File("Files/" + serverId, fileName);
         if (localFile.exists() ) {
-            byte[] fileContent = Files.readAllBytes(localFile.toPath());
-            dataOutputStream.writeInt(fileContent.length);
-            dataOutputStream.write(fileContent);
-            if(mode.equals("WRITE")){
+            if(mode.equals("OPEN")){
+                dataOutputStream.writeUTF("FILE OPENED");
+                while (true){
+                    String newResponse = dataInputStream.readUTF();
+                    if(newResponse.equals("CLOSE")){
+                        break;
+                    }else{
+                        int seekPos = dataInputStream.readInt();
+                        try (RandomAccessFile file = new RandomAccessFile(localFile, "r")) {
+                            // Move the file pointer to the specified position
+                            if (seekPos > file.length()) {
+                                // Position is beyond the end of the file
+                                dataOutputStream.writeUTF("Seek position is beyond the file length.");
+                            } else {
+                                file.seek(seekPos);
+                                dataOutputStream.writeUTF("File seeked to position: " + seekPos);
+                            }
+                        } catch (FileNotFoundException e) {
+                            dataOutputStream.writeUTF("File not found: " + fileName);
+                        } catch (IOException e) {
+                            dataOutputStream.writeUTF("IO Error: " + e.getMessage());
+                        }
+                    }
+                }
+
+
+
+            } else if(mode.equals("READ")){
+                byte[] fileContent = Files.readAllBytes(localFile.toPath());
+                dataOutputStream.writeInt(fileContent.length);
+                dataOutputStream.write(fileContent);
+            }else  if(mode.equals("WRITE")){
                 String command = dataInputStream.readUTF(); // Expecting "EDITED_CONTENT" command
                 if ("EDITED_CONTENT".equals(command)) {
                     updateFileContent(dataInputStream, fileName);
                 }
             }
+
+
         } else {
             dataOutputStream.writeInt(0); // Indicate file not found
         }
