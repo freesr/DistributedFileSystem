@@ -25,10 +25,69 @@ public class FileServer {
     private static volatile boolean running = true;
     static String serverId;
     static String serviceName = "file-server3";
-    static int numberOfReplicas = 3;
+    static int numberOfReplicas = 2;
     static int leaseDuration = 600000;
     private static Map<String, FileMetadata> fileMetadataMap = new HashMap<>();
     private  static KeyValueClient kvClient = Consul.builder().build().keyValueClient();
+
+    private static class ServerInfo  {
+        private String serverId; // New attribute
+        private String address;
+        private int port;
+        private int fileCount;
+        private boolean serverInactive; // New attribute
+
+        ServerInfo(String serverId,String address, int port,int fileCount,boolean serverInactive) {
+            this.serverId = serverId;
+            this.address = address;
+            this.port = port;
+            this.fileCount = fileCount;
+            this.serverInactive = serverInactive;
+        }
+        public String getServerId() {
+            return serverId;
+        }
+
+        public void setServerId(String serverId) {
+            this.serverId = serverId;
+        }
+
+        public void setServerInactive(boolean serverInactive) {
+            this.serverInactive = serverInactive;
+        }
+
+        public boolean isServerInactive() {
+            return serverInactive;
+        }
+
+        String toJson() {
+            Gson gson = new Gson();
+            return gson.toJson(this);
+        }
+
+        static ServerInfo fromJson(String json) {
+            Gson gson = new Gson();
+            return gson.fromJson(json, ServerInfo.class);
+        }
+
+
+        public String getAddress() {
+            return address;
+        }
+
+        public int getPort() {
+            return port;
+        }
+
+        public int getFileCount() {
+            return fileCount;
+        }
+
+        public void setFileCount(int fileCount) {
+            this.fileCount = fileCount;
+        }
+    }
+
 
     static class FileMetadata {
         String fileName;
@@ -75,8 +134,15 @@ public class FileServer {
         serverId = "file-server-" + args[0]; // Passed as a command line argument
         int port = Integer.parseInt(args[1]);       // Port number as a command line argument
 
+        registerServerInConsul(serverId, "127.0.0.1", port, false); // false indicates server is active
+
+
         // Register with Consul
         registerServiceWithConsul(serverId, serviceName , port);
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            updateServerStatusInConsul(serverId, true); // true indicates server is inactive
+        }));
+
         try {
             startServer(port);
         } catch (IOException e) {
@@ -117,7 +183,6 @@ public class FileServer {
             kvClient.putValue("files/" + fileName, metadata.toJson());
         }
     }
-
 
     static class HealthCheckHandler implements HttpHandler {
         @Override
@@ -169,8 +234,6 @@ public class FileServer {
         Optional<String> metadataJson = kvClient.getValueAsString("files/"+ fileName);
         return metadataJson.map(FileMetadata::fromJson).orElse(null);
     }
-
-
 
 
     private static void buildHashRing() {
@@ -333,9 +396,8 @@ public class FileServer {
                 try {
                     fetchFileFromServer(metadata.serverId, fileName, localFile,dataOutputStream,dataInputStream,mode);
                 } catch (Exception e) {
-                    System.out.println("Failed to fetch file from other server: " + e.getMessage());
-                    dataOutputStream.writeInt(0); // Indicate file not found or error
-                    return;
+                    System.out.println("Primary server is down. Selecting a new primary server.");
+                    selectNewPrimaryServerAndRead(fileName, dataOutputStream, dataInputStream, mode, metadata);
                 }
             }
         }else{
@@ -343,6 +405,44 @@ public class FileServer {
         }
 
     }
+    private static void  selectNewPrimaryServerAndRead(String fileName, DataOutputStream dataOutputStream, DataInputStream dataInputStream, String mode,FileMetadata metadata) throws IOException {
+        ServerInfo newPrimaryServer = selectServerBasedOnFileCount(metadata);
+
+        if (newPrimaryServer != null) {
+            // Update the primary server in metadata and save it in Consul
+            metadata.serverId = newPrimaryServer.serverId;
+            metadata.replicatedNodes.remove(metadata.serverId);
+            List<ServerInfo> replicationTargets = selectServersForReplicationFail(1,metadata.serverId);
+            File file = new File("Files/" + serverId, fileName);
+            replicateFileToNodes(file, fileName, metadata, replicationTargets);
+           // updateFileMetadataInConsul(fileName, metadata);
+
+            // Fetch the file from the new primary server
+            fetchFileFromServer(newPrimaryServer.serverId, fileName, new File("Files/" + serverId, fileName), dataOutputStream, dataInputStream, mode);
+        } else {
+            dataOutputStream.writeUTF("Failed to find a new primary server for the file.");
+        }
+    }
+
+    private static ServerInfo selectServerBasedOnFileCount(FileMetadata metadata) {
+        // Logic to select a server with the least file count
+        String selectedServerId = null;
+        int minFileCount = Integer.MAX_VALUE;
+        ServerInfo selectedNode = null;
+
+        for (String serverId : metadata.replicatedNodes) {
+            ServerInfo info = getServerDetailsFromConsul(serverId);
+            if (info != null && !info.isServerInactive() && info.getFileCount() < minFileCount) {
+                minFileCount = info.getFileCount();
+                selectedNode = info;
+                selectedServerId = serverId;
+            }
+        }
+
+        return selectedNode; // Returns the ID of the server with the lowest file count
+    }
+
+
 
     private static void sendReadToServer(String fileName,DataOutputStream dataOutputStream,DataInputStream dataInputStream, String mode) throws IOException{
         File localFile = new File("Files/" + serverId, fileName);
@@ -384,9 +484,13 @@ public class FileServer {
 
     private static void fetchFileFromServer(String serverId, String fileName, File localFile,DataOutputStream dataOutputStream,DataInputStream dataInputStream,String mode) throws IOException {
         // Fetch the server details (IP address and port) from Consul
-        ServiceHealth server = getServerDetailsFromConsul(serverId);
-        String serverAddress = server.getNode().getAddress();
-        int serverPort = server.getService().getPort();
+        ServerInfo serverInfo = getServerDetailsFromConsul(serverId);
+        if (serverInfo == null) {
+            throw new IOException("Server details not found for server ID: " + serverId);
+        }
+
+        String serverAddress = serverInfo.getAddress();
+        int serverPort = serverInfo.getPort();
 
         // Connect to the server and request the file
         try (Socket socket = new Socket(serverAddress, serverPort);
@@ -408,24 +512,16 @@ public class FileServer {
         }
     }
 
-    private static ServiceHealth getServerDetailsFromConsul(String serverId) {
-        Consul consul = Consul.builder().build();
-        HealthClient healthClient = consul.healthClient();
-
-        // Query for all healthy instances of the service
-        List<ServiceHealth> nodes = healthClient.getHealthyServiceInstances("file-server3").getResponse();
-
-        // Search for the server with the given ID
-        Optional<ServiceHealth> matchingServer = nodes.stream()
-                .filter(node -> node.getService().getId().equals(serverId))
-                .findFirst();
-
-        if (matchingServer.isPresent()) {
-            return matchingServer.get();
-        } else {
-            throw new RuntimeException("Server with ID " + serverId + " not found in Consul.");
+    private static ServerInfo getServerDetailsFromConsul(String serverId) {
+        KeyValueClient kvClient = Consul.builder().build().keyValueClient();
+        String key = "server-info/" + serverId;
+        Optional<String> value = kvClient.getValueAsString(key);
+        if (value.isPresent()) {
+            return ServerInfo.fromJson(value.get());
         }
+        return null; // Or handle appropriately
     }
+
 
     private static void handleFileUpload(DataInputStream dataInputStream, String saveDirectory) throws IOException {
         String fileName = dataInputStream.readUTF();
@@ -446,7 +542,10 @@ public class FileServer {
         FileMetadata metadata = new FileMetadata(fileName, file.length(), new Date(),serverId);
         updateFileMetadataInConsul(fileName, metadata);
 
-        replicateFileToNodes(file,fileName, metadata);
+        updateFileCountInConsul(serverId, true);
+
+        List<ServerInfo> replicationTargets = selectServersForReplication(numberOfReplicas);
+        replicateFileToNodes(file, fileName, metadata, replicationTargets);
     }
 
 
@@ -466,17 +565,19 @@ public class FileServer {
             } else {
                 dataOutputStream.writeUTF("Failed to delete the file.");
             }
+            updateFileCountInConsul(serverId, false);
         } else {
             dataOutputStream.writeUTF("File not found.");
         }
     }
 
     private static void deleteReplicaOnNode(String nodeId, String fileName) {
-        ServiceHealth node = getServerDetailsFromConsul(nodeId);
-        String nodeAddress = node.getNode().getAddress();
-        int nodePort = node.getService().getPort();
+        ServerInfo serverInfo = getServerDetailsFromConsul(serverId);
 
-        try (Socket socket = new Socket(nodeAddress, nodePort);
+        String serverAddress = serverInfo.getAddress();
+        int serverPort = serverInfo.getPort();
+
+        try (Socket socket = new Socket(serverAddress, serverPort);
              DataOutputStream out = new DataOutputStream(socket.getOutputStream())) {
 
             out.writeUTF("DELETE_REPLICA");
@@ -485,7 +586,6 @@ public class FileServer {
             System.out.println("Error occurred while deleting replica on node " + nodeId + ": " + e.getMessage());
         }
     }
-
 
 
 
@@ -502,19 +602,50 @@ public class FileServer {
         try (BufferedWriter writer = new BufferedWriter(new FileWriter(file))) {
             writer.write(fileContent);
         }
+
         FileMetadata metadata = new FileMetadata(fileName, file.length(), new Date(),serverId);
         updateFileMetadataInConsul(fileName, metadata);
-        replicateFileToNodes(file,fileName, metadata);
+
+        updateFileCountInConsul(serverId, true);
+
+        List<ServerInfo> replicationTargets = selectServersForReplication(numberOfReplicas);
+        replicateFileToNodes(file, fileName, metadata, replicationTargets);
+
+
     }
 
-    private static void replicateFileToNodes(File file,String fileName, FileMetadata metadata) {
-        List<ServiceHealth> replicationNodes = selectReplicationNodes();
-        for (ServiceHealth node : replicationNodes) {
-            boolean success = sendFileToNode(node, fileName, file);
+    private static void replicateFileToNodes(File file, String fileName, FileMetadata metadata, List<ServerInfo> replicationTargets) {
+        for (ServerInfo target : replicationTargets) {
+            boolean success = sendFileToNode(target, fileName, file);
             if (success) {
-                metadata.addReplicatedNode(node.getService().getId());
+                metadata.addReplicatedNode(target.getServerId()); // Assuming getServerId() exists in ServerInfo
                 // Update metadata in Consul again after successful replication
-                updateFileMetadataInConsul(file.getName(), metadata);            }
+                updateFileMetadataInConsul(file.getName(), metadata);
+                updateFileCountInConsul(target.getServerId(),true);
+            }
+        }
+    }
+
+
+    private static void registerServerInConsul(String serverId, String address, int port, boolean serverInactive) {
+        KeyValueClient kvClient = Consul.builder().build().keyValueClient();
+        String key = "server-info/" + serverId;
+
+        ServerInfo info = new ServerInfo(serverId,address,port,0,serverInactive);
+
+        kvClient.putValue(key, info.toJson()); // Assuming toJson() method in ServerInfo class
+    }
+
+    private static void updateServerStatusInConsul(String serverId, boolean serverInactive) {
+        KeyValueClient kvClient = Consul.builder().build().keyValueClient();
+        String key = "server-info/" + serverId;
+
+        Optional<String> currentValue = kvClient.getValueAsString(key);
+        if (currentValue.isPresent()) {
+            ServerInfo info = ServerInfo.fromJson(currentValue.get());
+            info.setServerInactive(serverInactive);
+
+            kvClient.putValue(key, info.toJson());
         }
     }
 
@@ -538,30 +669,80 @@ public class FileServer {
     }
 
     private static void updateFileCountInConsul(String serverId, boolean increment) {
-        String key = "server-file-count/" + serverId;
-        int currentCount = 0;
+        KeyValueClient kvClient = Consul.builder().build().keyValueClient();
+        String key = "server-info/" + serverId;
         Optional<String> currentValue = kvClient.getValueAsString(key);
-
         if (currentValue.isPresent()) {
-            currentCount = Integer.parseInt(currentValue.get());
+            ServerInfo info = ServerInfo.fromJson(currentValue.get());
+            int currentCount = info.getFileCount();
+            currentCount = increment ? currentCount + 1 : Math.max(currentCount - 1, 0);
+            info.setFileCount(currentCount);
+            kvClient.putValue(key, info.toJson());
+        }
+    }
+
+
+    private static List<ServerInfo> selectServersForReplication(int numberOfReplicas) {
+        KeyValueClient kvClient = Consul.builder().build().keyValueClient();
+        List<String> serverIds = kvClient.getKeys("server-info/"); // Get keys for all server info
+        Map<String, Integer> fileCountMap = new HashMap<>();
+
+        // Fetch file count for each active server and populate the map
+        for (String eachServerId : serverIds) {
+            if (!eachServerId.equals(serverId)) { // Exclude the current server
+                kvClient.getValueAsString(eachServerId).ifPresent(json -> {
+                    ServerInfo info = ServerInfo.fromJson(json);
+                    if (!info.isServerInactive()) { // Check if server is active
+                        fileCountMap.put(info.getServerId(), info.getFileCount());
+                    }
+                });
+            }
         }
 
-        currentCount = increment ? currentCount + 1 : currentCount - 1;
-        kvClient.putValue(key, String.valueOf(currentCount));
+
+        // Sort the entries by file count and select the top servers with the least file count
+        return fileCountMap.entrySet().stream()
+                .sorted(Map.Entry.comparingByValue())
+                .limit(numberOfReplicas)
+                .map(entry -> getServerDetailsFromConsul(entry.getKey())) // Convert serverId to ServerInfo
+                .collect(Collectors.toList());
+    }
+    private static List<ServerInfo> selectServersForReplicationFail(int numberOfReplicas,String pServerID) {
+        KeyValueClient kvClient = Consul.builder().build().keyValueClient();
+        List<String> serverIds = kvClient.getKeys("server-info/"); // Get keys for all server info
+        Map<String, Integer> fileCountMap = new HashMap<>();
+
+        // Fetch file count for each active server and populate the map
+        for (String eachServerId : serverIds) {
+            if (!(eachServerId.equals(serverId) || !eachServerId.equals(pServerID))) { // Exclude the current server
+                kvClient.getValueAsString(eachServerId).ifPresent(json -> {
+                    ServerInfo info = ServerInfo.fromJson(json);
+                    if (!info.isServerInactive()) { // Check if server is active
+                        fileCountMap.put(info.getServerId(), info.getFileCount());
+                    }
+                });
+            }
+        }
+
+
+        // Sort the entries by file count and select the top servers with the least file count
+        return fileCountMap.entrySet().stream()
+                .sorted(Map.Entry.comparingByValue())
+                .limit(numberOfReplicas)
+                .map(entry -> getServerDetailsFromConsul(entry.getKey())) // Convert serverId to ServerInfo
+                .collect(Collectors.toList());
     }
 
 
 
-
-
-    private static boolean sendFileToNode(ServiceHealth node,String fileName, File file) {
+    private static boolean sendFileToNode(ServerInfo node,String fileName, File file) {
         if (!file.exists()) {
             System.out.println("File does not exist: " );
             return false;
         }
 
 
-        try (Socket socket = new Socket(node.getNode().getAddress(),node.getService().getPort() );
+        try (Socket socket = new Socket(node.getAddress(),node.getPort() );
              DataOutputStream dataOutputStream = new DataOutputStream(socket.getOutputStream());
              BufferedInputStream fileInputStream = new BufferedInputStream(new FileInputStream(file))) {
 
