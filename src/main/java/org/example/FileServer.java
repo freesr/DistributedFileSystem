@@ -419,13 +419,14 @@ public class FileServer {
             // Update the primary server in metadata and save it in Consul
             metadata.serverId = newPrimaryServer.serverId;
             metadata.replicatedNodes.remove(metadata.serverId);
-            List<ServerInfo> replicationTargets = selectServersForReplicationFail(1,metadata.serverId);
+            List<ServerInfo> replicationTargets = selectServersForReplicationFail(1,metadata);
             File file = new File("Files/" + serverId, fileName);
-            replicateFileToNodes(file, fileName, metadata, replicationTargets);
            // updateFileMetadataInConsul(fileName, metadata);
 
             // Fetch the file from the new primary server
             fetchFileFromServer(newPrimaryServer.serverId, fileName, new File("Files/" + serverId, fileName), dataOutputStream, dataInputStream, mode);
+            replicateFileToNodes(file, fileName, metadata, replicationTargets);
+
         } else {
             dataOutputStream.writeUTF("Failed to find a new primary server for the file.");
         }
@@ -462,14 +463,17 @@ public class FileServer {
                         break;
                     }else{
                         int seekPos = dataInputStream.readInt();
-                        try (RandomAccessFile file = new RandomAccessFile(localFile, "r")) {
+                        try (RandomAccessFile randomAccessFile  = new RandomAccessFile(localFile, "r")) {
                             // Move the file pointer to the specified position
-                            if (seekPos > file.length()) {
+                            if (seekPos > randomAccessFile .length()) {
                                 // Position is beyond the end of the file
                                 dataOutputStream.writeUTF("Seek position is beyond the file length.");
                             } else {
-                                file.seek(seekPos);
-                                dataOutputStream.writeUTF("File seeked to position: " + seekPos);
+                                randomAccessFile.seek(seekPos);
+                                byte[] buffer = new byte[1024]; // Read up to 1024 bytes
+                                int bytesRead = randomAccessFile.read(buffer);
+                                String content = new String(buffer, 0, bytesRead);
+                                dataOutputStream.writeUTF(content);
                             }
                         } catch (FileNotFoundException e) {
                             dataOutputStream.writeUTF("File not found: " + fileName);
@@ -726,7 +730,7 @@ public class FileServer {
 
         // Fetch file count for each active server and populate the map
         for (String eachServerId : serverIds) {
-            if (!eachServerId.equals(serverId)) { // Exclude the current server
+            if (!eachServerId.equals("server-info/"+serverId)) { // Exclude the current server
                 kvClient.getValueAsString(eachServerId).ifPresent(json -> {
                     ServerInfo info = ServerInfo.fromJson(json);
                     if (!info.isServerInactive()) { // Check if server is active
@@ -744,14 +748,15 @@ public class FileServer {
                 .map(entry -> getServerDetailsFromConsul(entry.getKey())) // Convert serverId to ServerInfo
                 .collect(Collectors.toList());
     }
-    private static List<ServerInfo> selectServersForReplicationFail(int numberOfReplicas,String pServerID) {
+    private static List<ServerInfo> selectServersForReplicationFail(int numberOfReplicas,FileMetadata metadata) {
         KeyValueClient kvClient = Consul.builder().build().keyValueClient();
         List<String> serverIds = kvClient.getKeys("server-info/"); // Get keys for all server info
+
         Map<String, Integer> fileCountMap = new HashMap<>();
 
         // Fetch file count for each active server and populate the map
         for (String eachServerId : serverIds) {
-            if (!(eachServerId.equals(serverId) || !eachServerId.equals(pServerID))) { // Exclude the current server
+            if (!((metadata.replicatedNodes).contains(eachServerId.split("/")[1]) || metadata.serverId.equals(eachServerId.split("/")[1]))) { // Exclude the current server
                 kvClient.getValueAsString(eachServerId).ifPresent(json -> {
                     ServerInfo info = ServerInfo.fromJson(json);
                     if (!info.isServerInactive()) { // Check if server is active
