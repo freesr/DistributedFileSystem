@@ -15,20 +15,27 @@ import java.io.*;
 import java.net.*;
 import java.nio.file.Files;
 import java.util.*;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 
 public class FileServer {
 
-    private static final int SERVER_PORT = 8080; // Example port
-    private static final NavigableMap<Integer, ServiceHealth> hashRing = new TreeMap<>();
     private static volatile boolean running = true;
     static String serverId;
     static String serviceName = "file-server3";
     static int numberOfReplicas = 2;
     static int leaseDuration = 600000;
+    private static final Logger logger = LoggerFactory.getLogger(FileServer.class);
+
     private static Map<String, FileMetadata> fileMetadataMap = new HashMap<>();
     private  static KeyValueClient kvClient = Consul.builder().build().keyValueClient();
+    private static Map<String, Long> temporaryFiles = new HashMap<>();
+
 
     private static class ServerInfo  {
         private String serverId; // New attribute
@@ -37,15 +44,27 @@ public class FileServer {
         private int fileCount;
         private boolean serverInactive; // New attribute
 
-        ServerInfo(String serverId,String address, int port,int fileCount,boolean serverInactive) {
+        private boolean primaryServer; // New attribute for primary server flag
+
+
+        ServerInfo(String serverId,String address, int port,int fileCount,boolean serverInactive, boolean primaryServer) {
             this.serverId = serverId;
             this.address = address;
             this.port = port;
             this.fileCount = fileCount;
             this.serverInactive = serverInactive;
+            this.primaryServer = primaryServer;
         }
         public String getServerId() {
             return serverId;
+        }
+
+        public boolean isPrimaryServer() {
+            return primaryServer;
+        }
+
+        public void setPrimaryServer(boolean primaryServer) {
+            this.primaryServer = primaryServer;
         }
 
         public void setServerId(String serverId) {
@@ -142,6 +161,7 @@ public class FileServer {
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             updateServerStatusInConsul(serverId, true); // true indicates server is inactive
         }));
+        startCleanupTask();
 
         try {
             startServer(port);
@@ -150,10 +170,9 @@ public class FileServer {
         } finally {
             deregisterServiceFromConsul();
         }
-
+        logger.info("Server stopped.");
         System.out.println("Server stopped.");
 
-          buildHashRing();
     }
 
     private static boolean tryAcquireLease(String fileName, String serverId) {
@@ -200,6 +219,7 @@ public class FileServer {
         httpServer.createContext("/health", new HealthCheckHandler()); // Health check endpoint
         httpServer.setExecutor(null); // Default executor
         httpServer.start();
+        logger.info("HTTP Server started on port: " + port);
         System.out.println("HTTP Server started on port: " + port);
 
         // Start the Socket Server for handling client connections
@@ -208,6 +228,7 @@ public class FileServer {
 
             while (true) {
                 Socket clientSocket = serverSocket.accept();
+                logger.info("Client connected: " + clientSocket.getInetAddress());
                 System.out.println("Client connected: " + clientSocket.getInetAddress());
 
                 // Handle each client connection in a separate thread
@@ -215,6 +236,7 @@ public class FileServer {
             }
         } catch (IOException e) {
             System.out.println("Socket Server exception: " + e.getMessage());
+            logger.error("Socket Server exception: " + e.getMessage());
             e.printStackTrace();
         }
 
@@ -236,18 +258,6 @@ public class FileServer {
     }
 
 
-    private static void buildHashRing() {
-        // Build the hash ring logic as in the client
-        Consul consul = Consul.builder().build();
-        HealthClient healthClient = consul.healthClient();
-        List<ServiceHealth> nodes = healthClient.getHealthyServiceInstances("file-server3").getResponse();
-
-        for (ServiceHealth node : nodes) {
-            int hash = node.getService().getId().hashCode();
-            hashRing.put(hash, node);
-        }
-    }
-
     private static void handleClient(Socket clientSocket) {
         String SAVE_DIRECTORY = "Files/"+serverId;
         File serverDirectory = new File(SAVE_DIRECTORY);
@@ -255,6 +265,8 @@ public class FileServer {
             boolean wasSuccessful = serverDirectory.mkdirs();
             if (!wasSuccessful) {
                 System.out.println("Failed to create directory: " + serverDirectory);
+                logger.info("Failed to create directory: " + serverDirectory);
+
             }
         }
 
@@ -266,7 +278,7 @@ public class FileServer {
 
             switch (command) {
                 case "CREATE":
-                    handleFileCreation(dataInputStream, SAVE_DIRECTORY);
+                    handleFileCreation(dataInputStream,dataOutputStream, SAVE_DIRECTORY);
                     dataOutputStream.writeUTF("File created successfully.");
                     break;
                 case "UPLOAD":
@@ -315,18 +327,18 @@ public class FileServer {
             }
         } catch (IOException e) {
             System.out.println("Error handling client: " + e.getMessage());
+            logger.error("Error handling client: " + e.getMessage());
             e.printStackTrace();
         } finally {
             try {
                 clientSocket.close();
             } catch (IOException e) {
                 System.out.println("Error closing client socket: " + e.getMessage());
+                logger.error("Error closing client socket: " + e.getMessage());
             }
         }
     }
 
-    private static void handleOpenRequest(DataInputStream dataInputStream, DataOutputStream dataOutputStream, String fileName) {
-    }
 
     private static void handleEditedContent(DataInputStream dataInputStream, DataOutputStream dataOutputStream) throws IOException {
         String fileName = dataInputStream.readUTF();
@@ -412,6 +424,24 @@ public class FileServer {
         }
 
     }
+
+    private static void startCleanupTask() {
+        logger.info("starting cleanup task");
+        ScheduledExecutorService executorService = Executors.newSingleThreadScheduledExecutor();
+        executorService.scheduleAtFixedRate(FileServer::cleanupTemporaryFiles, 1, 1, TimeUnit.HOURS);
+    }
+
+    private static void cleanupTemporaryFiles() {
+        long oneHourAgo = System.currentTimeMillis() - TimeUnit.HOURS.toMillis(1);
+        temporaryFiles.entrySet().removeIf(entry -> {
+            if (entry.getValue() < oneHourAgo) {
+                new File("Files/" + serverId, entry.getKey()).delete();
+                return true;
+            }
+            return false;
+        });
+    }
+
     private static void  selectNewPrimaryServerAndRead(String fileName, DataOutputStream dataOutputStream, DataInputStream dataInputStream, String mode,FileMetadata metadata) throws IOException {
         ServerInfo newPrimaryServer = selectServerBasedOnFileCount(metadata);
 
@@ -476,8 +506,10 @@ public class FileServer {
                                 dataOutputStream.writeUTF(content);
                             }
                         } catch (FileNotFoundException e) {
+                            logger.error("File not found: " + fileName);
                             dataOutputStream.writeUTF("File not found: " + fileName);
                         } catch (IOException e) {
+                            logger.error("IO Error: " + e.getMessage());
                             dataOutputStream.writeUTF("IO Error: " + e.getMessage());
                         }
                     }
@@ -490,6 +522,9 @@ public class FileServer {
                 dataOutputStream.writeInt(fileContent.length);
                 dataOutputStream.write(fileContent);
             }else  if(mode.equals("WRITE")){
+                byte[] fileContent = Files.readAllBytes(localFile.toPath());
+                dataOutputStream.writeInt(fileContent.length);
+                dataOutputStream.write(fileContent);
                 String command = dataInputStream.readUTF(); // Expecting "EDITED_CONTENT" command
                 if ("EDITED_CONTENT".equals(command)) {
                     updateFileContent(dataInputStream, fileName);
@@ -511,6 +546,7 @@ public class FileServer {
             dataInputStream.readFully(contentBytes);
             Files.write(localFile.toPath() , contentBytes);
             releaseLease(fileName);
+            logger.info("File updated successfully: " + fileName);
             System.out.println("File updated successfully: " + fileName);
         }
     }
@@ -518,6 +554,7 @@ public class FileServer {
         File file = new File("Files/" + serverId, fileName);
         if (file.exists()) {
             if (!file.delete()) {
+                logger.info("Failed to delete replica: " + fileName);
                 System.out.println("Failed to delete replica: " + fileName);
             }
         }
@@ -527,6 +564,7 @@ public class FileServer {
         // Fetch the server details (IP address and port) from Consul
         ServerInfo serverInfo = getServerDetailsFromConsul(serverId);
         if (serverInfo == null) {
+            logger.error("Server details not found for server ID: " + serverId);
             throw new IOException("Server details not found for server ID: " + serverId);
         }
 
@@ -546,8 +584,10 @@ public class FileServer {
                 byte[] fileContent = new byte[fileLength];
                 in.readFully(fileContent);
                 Files.write(localFile.toPath(), fileContent);
+                temporaryFiles.put(fileName, System.currentTimeMillis());
                 sendReadToServer(fileName,dataOutputStream,dataInputStream,mode);
             } else {
+                logger.error("File not found on remote server");
                 throw new IOException("File not found on remote server");
             }
         }
@@ -630,7 +670,7 @@ public class FileServer {
 
 
 
-    private static void handleFileCreation(DataInputStream dataInputStream, String saveDirectory) throws IOException {
+    private static void handleFileCreation(DataInputStream dataInputStream,DataOutputStream dataOutputStream, String saveDirectory) throws IOException {
         String fileName = dataInputStream.readUTF();
         String fileContent = dataInputStream.readUTF();
 
@@ -640,18 +680,22 @@ public class FileServer {
         }
 
         File file = new File(directory, fileName);
-        try (BufferedWriter writer = new BufferedWriter(new FileWriter(file))) {
-            writer.write(fileContent);
+        FileMetadata existingMetadata = getFileMetadataFromConsul(fileName);
+        if (existingMetadata != null) {
+            dataOutputStream.writeUTF("Filename exists");
+        }else{
+            try (BufferedWriter writer = new BufferedWriter(new FileWriter(file))) {
+                writer.write(fileContent);
+            }
+
+            FileMetadata metadata = new FileMetadata(fileName, file.length(), new Date(),serverId);
+            updateFileMetadataInConsul(fileName, metadata);
+
+            updateFileCountInConsul(serverId, true);
+
+            List<ServerInfo> replicationTargets = selectServersForReplication(numberOfReplicas);
+            replicateFileToNodes(file, fileName, metadata, replicationTargets);
         }
-
-        FileMetadata metadata = new FileMetadata(fileName, file.length(), new Date(),serverId);
-        updateFileMetadataInConsul(fileName, metadata);
-
-        updateFileCountInConsul(serverId, true);
-
-        List<ServerInfo> replicationTargets = selectServersForReplication(numberOfReplicas);
-        replicateFileToNodes(file, fileName, metadata, replicationTargets);
-
 
     }
 
@@ -672,7 +716,21 @@ public class FileServer {
         KeyValueClient kvClient = Consul.builder().build().keyValueClient();
         String key = "server-info/" + serverId;
 
-        ServerInfo info = new ServerInfo(serverId,address,port,0,serverInactive);
+        List<String> serverKeys  = kvClient.getKeys("server-info/");
+        List<ServerInfo> activeServers = new ArrayList<>();
+
+        // Fetch details for each server and populate the list of active servers
+        for (String eachServerKey : serverKeys) {
+            kvClient.getValueAsString(eachServerKey).ifPresent(json -> {
+                ServerInfo info = ServerInfo.fromJson(json);
+                if (!info.isServerInactive()) { // Add only active servers
+                    activeServers.add(info);
+                }
+            });
+        }
+        boolean isFirstServer = activeServers.isEmpty();
+
+        ServerInfo info = new ServerInfo(serverId, address, port, 0, false, isFirstServer); // Set primaryServer flag
 
         kvClient.putValue(key, info.toJson()); // Assuming toJson() method in ServerInfo class
     }
@@ -808,43 +866,6 @@ public class FileServer {
     }
 
 
-    private static List<ServiceHealth> findNearestNodes() {
-        List<ServiceHealth> nearestNodes = new ArrayList<>();
-        int currentServerHash =  hash(serverId);/* Your current server's hash value */;
-        boolean firstNodeFound = false;
-
-        // Iterate over the hash ring
-        for (Map.Entry<Integer, ServiceHealth> entry : hashRing.tailMap(currentServerHash, true).entrySet()) {
-            if (!firstNodeFound) {
-                firstNodeFound = true; // Skip the current server itself
-                continue;
-            }
-
-            nearestNodes.add(entry.getValue());
-            if (nearestNodes.size() == 2) {
-                break;
-            }
-        }
-
-        // If the end of the ring bn  is reached and less than two nodes are found, start from the beginning
-        if (nearestNodes.size() < 2) {
-            for (Map.Entry<Integer, ServiceHealth> entry : hashRing.entrySet()) {
-                if (nearestNodes.contains(entry.getValue())) {
-                    continue; // Avoid duplicates
-                }
-
-                nearestNodes.add(entry.getValue());
-                if (nearestNodes.size() == 2) {
-                    break;
-                }
-            }
-        }
-
-        return nearestNodes;        // Logic to find two nearest nodes on the hash ring
-        // This depends on the server's own position on the ring and the positions of other servers
-
-    }
-
     private static void registerServiceWithConsul(String serviceId, String serviceName, int port) {
         Consul consul = Consul.builder().build();
         AgentClient agentClient = consul.agentClient();
@@ -863,14 +884,57 @@ public class FileServer {
         System.out.println("Registered service with Consul: " + serviceId);
     }
     private static void deregisterServiceFromConsul() {
+
+        updateServerStatusInConsul(serverId, true, false); // New method to update status and primary flag
+
+        // Select a new primary server
+        ServerInfo newPrimaryServer = selectNewPrimaryServer();
+
+        if (newPrimaryServer != null) {
+            // Update the new primary server's status in Consul
+            updateServerStatusInConsul(newPrimaryServer.getServerId(), false, true);
+        }
         Consul consul = Consul.builder().build();
         AgentClient agentClient = consul.agentClient();
         agentClient.deregister(serverId);
         System.out.println("Deregistered service from Consul: " + serverId);
     }
 
-    private static int hash(String key) {
-        // Simple hashing function (you may use more sophisticated ones)
-        return key.hashCode();
+    private static void updateServerStatusInConsul(String serverId, boolean serverInactive, boolean primaryServer) {
+        KeyValueClient kvClient = Consul.builder().build().keyValueClient();
+        String key = "server-info/" + serverId;
+
+        Optional<String> currentValue = kvClient.getValueAsString(key);
+        if (currentValue.isPresent()) {
+            ServerInfo info = ServerInfo.fromJson(currentValue.get());
+            info.setServerInactive(serverInactive);
+            info.setPrimaryServer(primaryServer);
+
+            kvClient.putValue(key, info.toJson());
+        }
+    }
+
+    private static ServerInfo selectNewPrimaryServer() {
+        KeyValueClient kvClient = Consul.builder().build().keyValueClient();
+        List<String> serverIds = kvClient.getKeys("server-info/"); // Get keys for all server info
+
+        List<ServerInfo> activeServers = new ArrayList<>();
+
+        // Fetch details for each server and populate the list of active servers
+        for (String eachServerId : serverIds) {
+            kvClient.getValueAsString(eachServerId).ifPresent(json -> {
+                ServerInfo info = ServerInfo.fromJson(json);
+                if (!info.isServerInactive() && !info.getServerId().equals(serverId)) { // Exclude the current server
+                    activeServers.add(info);
+                }
+            });
+        }
+
+        // Select a random server from the list of active servers
+        if (!activeServers.isEmpty()) {
+            Random rand = new Random();
+            return activeServers.get(rand.nextInt(activeServers.size()));
+        }
+        return null; // Return null if no active servers are found
     }
 }

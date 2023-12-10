@@ -1,0 +1,11 @@
+{
+  "data_dir": "data",
+  "server": true,
+  "node_name": "consul-server-1",
+  "datacenter": "dc1",
+  "bootstrap_expect": 3,
+  "bind_addr": "0.0.0.0",
+  "client_addr": "0.0.0.0",
+  "ui": true,
+  "retry_join": ["ip_of_server_1", "ip_of_server_2", "ip_of_server_3"]
+}

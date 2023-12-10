@@ -1,5 +1,6 @@
     package org.example;
 
+
     import com.orbitz.consul.Consul;
     import com.orbitz.consul.HealthClient;
     import com.orbitz.consul.cache.ServiceHealthCache;
@@ -21,10 +22,11 @@
 
 
     public class ClientServer {
-        private static final NavigableMap<Integer, ServiceHealth> hashRing = new TreeMap<>();
+        private static final ConsistentHashing hashRing = new ConsistentHashing(3, new ArrayList<>()); // 3 replicas, start with an empty list of servers
         private static final AtomicReference<ServerDetails> connectedServerDetails = new AtomicReference<>();
         private static final String SERVICE_NAME = "file-server3"; // replace with your service name
         private final HealthClient healthClient =  Consul.builder().build().healthClient();
+        private static HashMap<String,ServiceHealth> nodeIdPair = new HashMap<String,ServiceHealth>();
         static String userOperation;
 
         private static class ServerDetails {
@@ -38,7 +40,9 @@
         }
 
         public static void main(String[] args) {
+            //String clientId = UUID.randomUUID().toString();
             String clientId = UUID.randomUUID().toString();
+
 
             buildHashRing();
            // setupServiceWatcher();
@@ -61,11 +65,9 @@
                     System.out.println("Choose the operation \n 1.Upload Existing file \n 2.Create new file \n 3.Read file \n 4.Write to file \n 5.Delete File \n 6.File Open,Seek and Close \n 0.Exit");
                     userOperation = in.nextLine();
                     if (userOperation.equals("1")) {
-                        System.out.println("Enter File Path");
-                        String filePath = in.nextLine();
                         System.out.println("Enter File Name");
                         String filename = in.nextLine();
-                        sendFileToServer(address, port, filePath, filename);
+                        sendFileToServer(address, port, filename);
                     } else if (userOperation.equals("2")) {
                         System.out.println("Enter the name for the new file:");
                         String fileName = in.nextLine();
@@ -296,8 +298,9 @@
 
 
             for (ServiceHealth node : nodes) {
-                int hash = hash(node.getService().getId());
-                hashRing.put(hash, node);
+                String serverId = node.getService().getId();
+                nodeIdPair.put(serverId,node);
+                hashRing.addServer(serverId); // Use the addServer method of ConsistentHashing
             }
         }
 
@@ -305,21 +308,16 @@
             if (hashRing.isEmpty()) {
                 return null;
             }
-            int clientHash = hash(clientId);
-            Integer target = hashRing.ceilingKey(clientHash);
-            if (target == null) {
-                // Wrap around the hash ring
-                target = hashRing.firstKey();
-            }
-            return hashRing.get(target);
+            String selectedServerId = hashRing.get(clientId);
+            return nodeIdPair.get(selectedServerId);
         }
+//
+//        private static int hash(String key) {
+//            // Simple hashing function (you may use more sophisticated ones)
+//            return key.hashCode();
+//        }
 
-        private static int hash(String key) {
-            // Simple hashing function (you may use more sophisticated ones)
-            return key.hashCode();
-        }
-
-        private static void sendFileToServer(String SERVER_ADDRESS,int SERVER_PORT,String filePath, String fileName){
+        private static void sendFileToServer(String SERVER_ADDRESS,int SERVER_PORT,String filePath){
             File file = new File(filePath);
             if (!file.exists()) {
                 System.out.println("File does not exist: " + filePath);
