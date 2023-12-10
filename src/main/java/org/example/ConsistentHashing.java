@@ -55,7 +55,7 @@ public class ConsistentHashing {
 
     private int hash(String key) {
         int hashCode = key.hashCode();
-        int hashRingSize = 100; // The size of your hash ring
+        int hashRingSize = 8; // The size of your hash ring
         return Math.abs(hashCode) % hashRingSize;
     }
 }

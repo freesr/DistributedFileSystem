@@ -28,6 +28,7 @@
         private final HealthClient healthClient =  Consul.builder().build().healthClient();
         private static HashMap<String,ServiceHealth> nodeIdPair = new HashMap<String,ServiceHealth>();
         static String userOperation;
+        private static  long timetaken;
 
         private static class ServerDetails {
             String address;
@@ -41,7 +42,7 @@
 
         public static void main(String[] args) {
             //String clientId = UUID.randomUUID().toString();
-            String clientId = UUID.randomUUID().toString();
+            String clientId = "clinet" + Math.random() ;
 
 
             buildHashRing();
@@ -134,11 +135,11 @@
                             isFileOpen = false;
                         } else {
                             try {
-                                int seekPosition = Integer.parseInt(input);
+                                //int seekPosition = Integer.parseInt(input);
                                 out.writeUTF("SEEK");
-                                out.writeInt(seekPosition);
+                                out.writeInt(Integer.parseInt(input));
                                 String content = in.readUTF();
-                                System.out.println("Content at position " + seekPosition + ": " + content);
+                                System.out.println("Content at position " + input + ": " + content);
                             } catch (NumberFormatException e) {
                                 System.out.println("Invalid input. Please enter a valid integer.");
                             }
@@ -351,6 +352,7 @@
         }
 
         private static void sendNewFileToServer(String SERVER_ADDRESS, int SERVER_PORT, String fileName, String fileContent) {
+            timetaken = System.currentTimeMillis();
             try (Socket socket = new Socket(SERVER_ADDRESS, SERVER_PORT);
                  DataOutputStream out = new DataOutputStream(socket.getOutputStream());
                  BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()))) {
@@ -362,6 +364,9 @@
 
                 // Read server response
                 System.out.println("Server says: " + in.readLine());
+                timetaken = System.currentTimeMillis()- timetaken;
+                System.out.println("Time taken: " + timetaken);
+
             } catch (IOException e) {
                 System.out.println("Error occurred: " + e.getMessage());
                 e.printStackTrace();
