@@ -24,7 +24,7 @@
     public class ClientServer {
         private static final ConsistentHashing hashRing = new ConsistentHashing(3, new ArrayList<>()); // 3 replicas, start with an empty list of servers
         private static final AtomicReference<ServerDetails> connectedServerDetails = new AtomicReference<>();
-        private static final String SERVICE_NAME = "file-server3"; // replace with your service name
+        private static final String SERVICE_NAME = "file-server3";
         private final HealthClient healthClient =  Consul.builder().build().healthClient();
         private static HashMap<String,ServiceHealth> nodeIdPair = new HashMap<String,ServiceHealth>();
         static String userOperation;
@@ -176,7 +176,6 @@
             }
         }
 
-        // Method to delete a file on the server
         private static void deleteFileOnServer(String serverAddress, int serverPort, String fileName) {
             try (Socket socket = new Socket(serverAddress, serverPort);
                  DataOutputStream out = new DataOutputStream(socket.getOutputStream())) {
@@ -244,7 +243,6 @@
         }
 
         private static void editFile(String filePath) throws IOException, InterruptedException {
-            // Replace "nano" with the command for your preferred editor
             ProcessBuilder processBuilder = new ProcessBuilder("notepad", filePath);
             Process process = processBuilder.inheritIO().start();
             process.waitFor();
@@ -301,7 +299,7 @@
             for (ServiceHealth node : nodes) {
                 String serverId = node.getService().getId();
                 nodeIdPair.put(serverId,node);
-                hashRing.addServer(serverId); // Use the addServer method of ConsistentHashing
+                hashRing.addServer(serverId);
             }
         }
 

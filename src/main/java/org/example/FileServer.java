@@ -38,13 +38,13 @@ public class FileServer {
 
 
     private static class ServerInfo  {
-        private String serverId; // New attribute
+        private String serverId;
         private String address;
         private int port;
         private int fileCount;
-        private boolean serverInactive; // New attribute
+        private boolean serverInactive;
 
-        private boolean primaryServer; // New attribute for primary server flag
+        private boolean primaryServer;
 
 
         ServerInfo(String serverId,String address, int port,int fileCount,boolean serverInactive, boolean primaryServer) {
@@ -138,7 +138,7 @@ public class FileServer {
             return gson.toJson(this);
         }
 
-        // Static method to convert JSON back to FileMetadata
+        //  convert JSON back to FileMetadata
         static FileMetadata fromJson(String json) {
             Gson gson = new Gson();
             return gson.fromJson(json, FileMetadata.class);
@@ -147,19 +147,17 @@ public class FileServer {
     }
 
     public static void main(String[] args) {
-        // Initialize the server (e.g., start listening on a socket)
 
-        // Register with Consul
-        serverId = "file-server-" + args[0]; // Passed as a command line argument
-        int port = Integer.parseInt(args[1]);       // Port number as a command line argument
+        serverId = "file-server-" + args[0];
+        int port = Integer.parseInt(args[1]);       // Port number
 
-        registerServerInConsul(serverId, "127.0.0.1", port, false); // false indicates server is active
+        registerToConsul(serverId, "127.0.0.1", port, false); //server is active
 
 
         // Register with Consul
         registerServiceWithConsul(serverId, serviceName , port);
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            updateServerStatusInConsul(serverId, true); // true indicates server is inactive
+            updateServerStatusInConsul(serverId, true); //  server is inactive
         }));
         startCleanupTask();
 
@@ -175,7 +173,7 @@ public class FileServer {
 
     }
 
-    private static boolean tryAcquireLease(String fileName, String serverId) {
+    private static boolean requestLease(String fileName, String serverId) {
         Optional<String> metadataJson = kvClient.getValueAsString("files/" + fileName);
         FileMetadata metadata = metadataJson.map(FileMetadata::fromJson).orElse(null);
 
@@ -216,13 +214,12 @@ public class FileServer {
 
     private static void startServer(int port) throws IOException {
         HttpServer httpServer = HttpServer.create(new InetSocketAddress(port+1000), 0);
-        httpServer.createContext("/health", new HealthCheckHandler()); // Health check endpoint
-        httpServer.setExecutor(null); // Default executor
+        httpServer.createContext("/health", new HealthCheckHandler());
+        httpServer.setExecutor(null);
         httpServer.start();
         logger.info("HTTP Server started on port: " + port);
         System.out.println("HTTP Server started on port: " + port);
 
-        // Start the Socket Server for handling client connections
         try (ServerSocket serverSocket = new ServerSocket(port)) {
             System.out.println("Socket Server started, listening on: " + port);
 
@@ -231,7 +228,6 @@ public class FileServer {
                 logger.info("Client connected: " + clientSocket.getInetAddress());
                 System.out.println("Client connected: " + clientSocket.getInetAddress());
 
-                // Handle each client connection in a separate thread
                 new Thread(() -> handleClient(clientSocket)).start();
             }
         } catch (IOException e) {
@@ -295,11 +291,10 @@ public class FileServer {
                     break;
                 case "WRITE":
                      fileName = dataInputStream.readUTF();
-                    if (tryAcquireLease(fileName, serverId)) {
+                    if (requestLease(fileName, serverId)) {
                         handleReadRequest(dataInputStream, dataOutputStream,fileName,"WRITE");
 
                     } else {
-                        // Lease not acquired, inform the client
                         dataOutputStream.writeUTF("Lease not acquired. File is currently locked.");
                     }
                     //handleWriteRequest(dataInputStream, dataOutputStream);
@@ -316,7 +311,7 @@ public class FileServer {
                     break;
                 case "DELETE_REPLICA":
                     String replicaFileName = dataInputStream.readUTF();
-                    deleteLocalFile(replicaFileName); // You can reuse or modify the file deletion logic here
+                    deleteLocalFile(replicaFileName);
                     break;
                 case "OPEN":
                     fileName = dataInputStream.readUTF();
@@ -350,9 +345,7 @@ public class FileServer {
         File file = new File("Files/" + serverId, fileName);
         Files.write(file.toPath(), editedContent.getBytes());
 
-        // After updating the file, you might want to release the lease or update the file metadata
-        // Release the lease or update file metadata here
-        // For example: releaseLease(fileName);
+
 
         dataOutputStream.writeUTF("File updated successfully.");
     }
@@ -393,13 +386,6 @@ public class FileServer {
 //        updateFileMetadataInConsul(fileName, metadata);
     }
 
-    private static void handleWriteOperation(String fileName, String fileContent) {
-        FileMetadata metadata = getFileMetadataFromConsul(fileName);
-        if (metadata.lesseeServerId.equals(serverId) && metadata.isLeased) {
-            // Perform write operation
-            // After writing, notify the owner server to commit changes
-        }
-    }
 
     private static void handleReadRequest(DataInputStream dataInputStream, DataOutputStream dataOutputStream, String fileName,String mode) throws IOException {
         File localFile = new File("Files/" + serverId, fileName);
@@ -409,7 +395,6 @@ public class FileServer {
         if (!localFile.exists()) {
             FileMetadata metadata = getFileMetadataFromConsul(fileName);
 
-            // Check if file metadata exists and file is on another server
             if (metadata != null && !metadata.serverId.equals(serverId)) {
                 // Fetch file from the server where it's located
                 try {
@@ -494,9 +479,7 @@ public class FileServer {
                     }else{
                         int seekPos = dataInputStream.readInt();
                         try (RandomAccessFile randomAccessFile  = new RandomAccessFile(localFile, "r")) {
-                            // Move the file pointer to the specified position
                             if (seekPos > randomAccessFile .length()) {
-                                // Position is beyond the end of the file
                                 dataOutputStream.writeUTF("Seek position is beyond the file length.");
                             } else {
                                 randomAccessFile.seek(seekPos);
@@ -525,7 +508,7 @@ public class FileServer {
                 byte[] fileContent = Files.readAllBytes(localFile.toPath());
                 dataOutputStream.writeInt(fileContent.length);
                 dataOutputStream.write(fileContent);
-                String command = dataInputStream.readUTF(); // Expecting "EDITED_CONTENT" command
+                String command = dataInputStream.readUTF();
                 if ("EDITED_CONTENT".equals(command)) {
                     updateFileContent(dataInputStream, fileName);
                 }
@@ -561,7 +544,6 @@ public class FileServer {
     }
 
     private static void fetchFileFromServer(String serverId, String fileName, File localFile,DataOutputStream dataOutputStream,DataInputStream dataInputStream,String mode) throws IOException {
-        // Fetch the server details (IP address and port) from Consul
         ServerInfo serverInfo = getServerDetailsFromConsul(serverId);
         if (serverInfo == null) {
             logger.error("Server details not found for server ID: " + serverId);
@@ -600,7 +582,7 @@ public class FileServer {
         if (value.isPresent()) {
             return ServerInfo.fromJson(value.get());
         }
-        return null; // Or handle appropriately
+        return null;
     }
 
 
@@ -712,7 +694,7 @@ public class FileServer {
     }
 
 
-    private static void registerServerInConsul(String serverId, String address, int port, boolean serverInactive) {
+    private static void registerToConsul(String serverId, String address, int port, boolean serverInactive) {
         KeyValueClient kvClient = Consul.builder().build().keyValueClient();
         String key = "server-info/" + serverId;
 
@@ -723,16 +705,16 @@ public class FileServer {
         for (String eachServerKey : serverKeys) {
             kvClient.getValueAsString(eachServerKey).ifPresent(json -> {
                 ServerInfo info = ServerInfo.fromJson(json);
-                if (!info.isServerInactive()) { // Add only active servers
+                if (!info.isServerInactive()) { // Adding only active servers
                     activeServers.add(info);
                 }
             });
         }
         boolean isFirstServer = activeServers.isEmpty();
 
-        ServerInfo info = new ServerInfo(serverId, address, port, 0, false, isFirstServer); // Set primaryServer flag
+        ServerInfo info = new ServerInfo(serverId, address, port, 0, false, isFirstServer);
 
-        kvClient.putValue(key, info.toJson()); // Assuming toJson() method in ServerInfo class
+        kvClient.putValue(key, info.toJson());
     }
 
     private static void updateServerStatusInConsul(String serverId, boolean serverInactive) {
@@ -749,23 +731,7 @@ public class FileServer {
     }
 
 
-    private static List<ServiceHealth> selectReplicationNodes() {
 
-            Consul consul = Consul.builder().build();
-            HealthClient healthClient = consul.healthClient();
-
-            // Fetch all healthy service instances
-            List<ServiceHealth> nodes = healthClient.getHealthyServiceInstances(serviceName).getResponse();
-
-            // Shuffle and select a subset for replication
-        nodes = nodes.stream()
-                .filter(node -> !node.getService().getId().equals(serverId))
-                .collect(Collectors.toList());
-
-        // Shuffle and select a subset for replication
-        Collections.shuffle(nodes);
-        return nodes.stream().limit(Math.min(numberOfReplicas, nodes.size())).collect(Collectors.toList());
-    }
 
     private static void updateFileCountInConsul(String serverId, boolean increment) {
         KeyValueClient kvClient = Consul.builder().build().keyValueClient();
@@ -783,7 +749,7 @@ public class FileServer {
 
     private static List<ServerInfo> selectServersForReplication(int numberOfReplicas) {
         KeyValueClient kvClient = Consul.builder().build().keyValueClient();
-        List<String> serverIds = kvClient.getKeys("server-info/"); // Get keys for all server info
+        List<String> serverIds = kvClient.getKeys("server-info/");
         Map<String, Integer> fileCountMap = new HashMap<>();
 
         // Fetch file count for each active server and populate the map
@@ -803,7 +769,7 @@ public class FileServer {
         return fileCountMap.entrySet().stream()
                 .sorted(Map.Entry.comparingByValue())
                 .limit(numberOfReplicas)
-                .map(entry -> getServerDetailsFromConsul(entry.getKey())) // Convert serverId to ServerInfo
+                .map(entry -> getServerDetailsFromConsul(entry.getKey()))
                 .collect(Collectors.toList());
     }
     private static List<ServerInfo> selectServersForReplicationFail(int numberOfReplicas,FileMetadata metadata) {
@@ -885,7 +851,7 @@ public class FileServer {
     }
     private static void deregisterServiceFromConsul() {
 
-        updateServerStatusInConsul(serverId, true, false); // New method to update status and primary flag
+        updateServerStatusInConsul(serverId, true, false);
 
         // Select a new primary server
         ServerInfo newPrimaryServer = selectNewPrimaryServer();
@@ -930,11 +896,10 @@ public class FileServer {
             });
         }
 
-        // Select a random server from the list of active servers
         if (!activeServers.isEmpty()) {
             Random rand = new Random();
             return activeServers.get(rand.nextInt(activeServers.size()));
         }
-        return null; // Return null if no active servers are found
+        return null;
     }
 }
