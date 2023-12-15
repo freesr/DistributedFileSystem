@@ -630,7 +630,7 @@ public class FileServer {
             }
             updateFileCountInConsul(serverId, false);
         } else {
-            dataOutputStream.writeUTF("File not found.");
+            dataOutputStream.writeUTF("File is not found.");
         }
     }
 
