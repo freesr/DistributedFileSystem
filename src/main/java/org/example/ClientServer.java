@@ -238,9 +238,9 @@
                 out.writeUTF(fileName);
 
                 String response = in.readUTF();
-                System.out.println(response);
-                if ("Lease not acquired. File is currently locked.".equals(response)) {
-                    System.out.println("File is currently not available for writing.");
+                //System.out.println(response);
+                if (response.startsWith("Lease not acquired")) {
+                    System.out.println("Unable to write to file: " + response);
                     return;
                 }
 

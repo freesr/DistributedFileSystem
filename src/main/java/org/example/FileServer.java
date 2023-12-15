@@ -10,6 +10,8 @@ import com.orbitz.consul.model.agent.ImmutableRegistration;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
+import java.text.SimpleDateFormat;
+
 
 import java.io.*;
 import java.net.*;
@@ -173,21 +175,29 @@ public class FileServer {
 
     }
 
-    private static boolean requestLease(String fileName, String serverId) {
+    private static String requestLease(String fileName, String serverId) {
         Optional<String> metadataJson = kvClient.getValueAsString("files/" + fileName);
         FileMetadata metadata = metadataJson.map(FileMetadata::fromJson).orElse(null);
 
-        long currentTime = System.currentTimeMillis();
-        if (!metadata.isLeased || (metadata.leaseExpiryTime != 0 && currentTime > metadata.leaseExpiryTime)) {
-            metadata.isLeased = true;
-            metadata.leasedBy = serverId;
-            metadata.leaseExpiryTime = currentTime + leaseDuration;
+        if (metadata != null) {
+            long currentTime = System.currentTimeMillis();
+            if (!metadata.isLeased || (metadata.leaseExpiryTime != 0 && currentTime > metadata.leaseExpiryTime)) {
+                metadata.isLeased = true;
+                metadata.leasedBy = serverId;
+                metadata.leaseExpiryTime = currentTime + leaseDuration;
 
-            kvClient.putValue("files/" + fileName, metadata.toJson());
-            return true;
+                kvClient.putValue("files/" + fileName, metadata.toJson());
+                return "Lease acquired successfully.";
+            } else {
+                // Convert leaseExpiryTime to a readable date format
+                SimpleDateFormat dateFormat = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+                String readableDate = dateFormat.format(new Date(metadata.leaseExpiryTime));
+                return "Lease not acquired. File is currently locked. Lease expires at: " + readableDate;
+            }
         }
-        return false;
+        return "Lease not acquired. Unable to find file metadata.";
     }
+
 
     private static void releaseLease(String fileName) {
         Optional<String> metadataJson = kvClient.getValueAsString("files/" + fileName);
@@ -290,14 +300,13 @@ public class FileServer {
                     handleReadRequest(dataInputStream, dataOutputStream,fileName,"READ");
                     break;
                 case "WRITE":
-                     fileName = dataInputStream.readUTF();
-                    if (requestLease(fileName, serverId)) {
-                        handleReadRequest(dataInputStream, dataOutputStream,fileName,"WRITE");
-
+                    fileName = dataInputStream.readUTF();
+                    String leaseResponse = requestLease(fileName, serverId);
+                    if (leaseResponse.startsWith("Lease acquired")) {
+                        handleReadRequest(dataInputStream, dataOutputStream, fileName, "WRITE");
                     } else {
-                        dataOutputStream.writeUTF("Lease not acquired. File is currently locked.");
+                        dataOutputStream.writeUTF(leaseResponse); // Send the lease response to the client
                     }
-                    //handleWriteRequest(dataInputStream, dataOutputStream);
                     break;
                 case "READFROMSERVER":
                     handleReadFromServerRequest(dataInputStream,dataOutputStream);
