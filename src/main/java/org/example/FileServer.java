@@ -470,16 +470,16 @@ public class FileServer {
     private static void sendReadToServer(String fileName,DataOutputStream dataOutputStream,DataInputStream dataInputStream, String mode) throws IOException{
         File localFile = new File("Files/" + serverId, fileName);
         if (localFile.exists() ) {
-            if(mode.equals("OPEN")){
+            if(mode.equals("OPEN")) {
                 dataOutputStream.writeUTF("FILE OPENED");
-                while (true){
-                    String newResponse = dataInputStream.readUTF();
-                    if(newResponse.equals("CLOSE")){
+                while (true) {
+                    String command = dataInputStream.readUTF();
+                    if (command.equals("CLOSE")) {
                         break;
-                    }else{
+                    } else if (command.equals("SEEK")) {
                         int seekPos = dataInputStream.readInt();
-                        try (RandomAccessFile randomAccessFile  = new RandomAccessFile(localFile, "r")) {
-                            if (seekPos > randomAccessFile .length()) {
+                        try (RandomAccessFile randomAccessFile = new RandomAccessFile(localFile, "r")) {
+                            if (seekPos > randomAccessFile.length()) {
                                 dataOutputStream.writeUTF("Seek position is beyond the file length.");
                             } else {
                                 randomAccessFile.seek(seekPos);
@@ -495,29 +495,25 @@ public class FileServer {
                             logger.error("IO Error: " + e.getMessage());
                             dataOutputStream.writeUTF("IO Error: " + e.getMessage());
                         }
+                    } else if (mode.equals("READ")) {
+                        byte[] fileContent = Files.readAllBytes(localFile.toPath());
+                        dataOutputStream.writeInt(fileContent.length);
+                        dataOutputStream.write(fileContent);
+                    } else if (mode.equals("WRITE")) {
+                        byte[] fileContent = Files.readAllBytes(localFile.toPath());
+                        dataOutputStream.writeInt(fileContent.length);
+                        dataOutputStream.write(fileContent);
+                        String command_new = dataInputStream.readUTF();
+                        if ("EDITED_CONTENT".equals(command_new)) {
+                            updateFileContent(dataInputStream, fileName);
+                        }
                     }
                 }
-
-
-
-            } else if(mode.equals("READ")){
-                byte[] fileContent = Files.readAllBytes(localFile.toPath());
-                dataOutputStream.writeInt(fileContent.length);
-                dataOutputStream.write(fileContent);
-            }else  if(mode.equals("WRITE")){
-                byte[] fileContent = Files.readAllBytes(localFile.toPath());
-                dataOutputStream.writeInt(fileContent.length);
-                dataOutputStream.write(fileContent);
-                String command = dataInputStream.readUTF();
-                if ("EDITED_CONTENT".equals(command)) {
-                    updateFileContent(dataInputStream, fileName);
-                }
             }
-
-
         } else {
             dataOutputStream.writeInt(0); // Indicate file not found
         }
+
     }
 
     private static void updateFileContent(DataInputStream dataInputStream, String fileName) throws IOException {

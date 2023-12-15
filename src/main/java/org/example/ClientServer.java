@@ -136,7 +136,7 @@
                         } else {
                             try {
                                 //int seekPosition = Integer.parseInt(input);
-                                out.writeUTF("SEEK");
+                                out.writeUTF("SEEK"); // Add this line to send SEEK command
                                 out.writeInt(Integer.parseInt(input));
                                 String content = in.readUTF();
                                 System.out.println("Content at position " + input + ": " + content);
