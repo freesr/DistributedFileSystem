@@ -394,10 +394,14 @@ public class FileServer {
     private static void handleReadRequest(DataInputStream dataInputStream, DataOutputStream dataOutputStream, String fileName,String mode) throws IOException {
         File localFile = new File("Files/" + serverId, fileName);
         dataOutputStream.writeUTF(mode+" Running");
+        FileMetadata metadata = getFileMetadataFromConsul(fileName);
+
+
+        boolean isPrimaryOrReplica = metadata != null &&
+                (metadata.serverId.equals(serverId) || metadata.replicatedNodes.contains(serverId));
 
         // Check if file exists locally
         if (!localFile.exists()) {
-            FileMetadata metadata = getFileMetadataFromConsul(fileName);
 
             if (metadata != null && !metadata.serverId.equals(serverId)) {
                 // Fetch file from the server where it's located
@@ -410,6 +414,17 @@ public class FileServer {
             }
         }else{
             sendReadToServer(fileName,dataOutputStream,dataInputStream,mode);
+        }
+
+        if (localFile.exists() && !isPrimaryOrReplica) {
+            boolean deleted = localFile.delete();
+            if (deleted) {
+                logger.info("Deleted inconsistent file copy: " + fileName);
+            } else {
+                logger.error("Failed to delete inconsistent file copy: " + fileName);
+            }
+            dataOutputStream.writeUTF("File not found");
+            return;
         }
 
     }

@@ -25,8 +25,14 @@
         private static final ConsistentHashing hashRing = new ConsistentHashing(3, new ArrayList<>()); // 3 replicas, start with an empty list of servers
         private static final AtomicReference<ServerDetails> connectedServerDetails = new AtomicReference<>();
         private static final String SERVICE_NAME = "file-server3";
+        private static volatile boolean isServerHealthy = true;
+
         private final HealthClient healthClient =  Consul.builder().build().healthClient();
         private static HashMap<String,ServiceHealth> nodeIdPair = new HashMap<String,ServiceHealth>();
+        private static Boolean lastHealthStatus = null;
+        private static final int HEALTH_CHECK_TIMEOUT = 30000; // 30 seconds in milliseconds
+
+
         static String userOperation;
         private static  long timetaken;
 
@@ -49,6 +55,7 @@
            // setupServiceWatcher();
 
             ServiceHealth selectedServer = selectServer(clientId);
+
             if (selectedServer == null) {
                 System.out.println("No file servers available.");
                 return;
@@ -62,8 +69,18 @@
             Scanner in = new Scanner(System.in);
             try {
                 while (true) {
+//                    if (!isServerHealthy) {
+//                        System.out.println("The connected server is down. Do you want to connect to a new server? (yes/no)");
+//                        String userChoice = in.nextLine();
+//                        if ("yes".equalsIgnoreCase(userChoice)) {
+//                            selectAndConnectToNewServer(clientId);
+//                        } else {
+//                            System.out.println("Waiting for the server to become available...");
+//                            // Implement waiting logic here (e.g., wait for some time and then retry)
+//                        }
+//                    }
                     System.out.println("____________________\n");
-                    System.out.println("Choose the operation \n 1.Upload Existing file \n 2.Create new file \n 3.Read file \n 4.Write to file \n 5.Delete File \n 6.File Open,Seek and Close \n 0.Exit");
+                    System.out.println("Choose the operation \n 1.Upload Existing file \n 2.Create new file \n 3.Read file \n 4.Write to file \n 5.Delete File \n 6.File Open,Seek and Close \n 7. Restart Server \n 0.Exit");
                     userOperation = in.nextLine();
                     if (userOperation.equals("1")) {
                         System.out.println("Enter File Name");
@@ -101,6 +118,8 @@
                     } else if (userOperation.equals("0")) {
                         System.out.println("Closing application");
                         System.exit(0);
+                    } else if (userOperation.equals("7")) {
+                        selectAndConnectToNewServer(clientId);
                     } else{
                         System.out.println("Invalid Input. Try Again");
                     }
@@ -190,6 +209,20 @@
             }
         }
 
+        private static void selectAndConnectToNewServer(String clientId) {
+            buildHashRing();
+            ServiceHealth newSelectedServer = selectServer(clientId);
+            if (newSelectedServer != null) {
+                String address = newSelectedServer.getNode().getAddress();
+                int port = newSelectedServer.getService().getPort();
+                connectedServerDetails.set(new ServerDetails(address, port));
+                System.out.println("Connecting to new server: " + address + ":" + port);
+            } else {
+                System.out.println("No available servers to connect to.");
+            }
+        }
+
+
 
         private static void requestWriteToFile(String serverAddress, int serverPort, String fileName) {
             Socket socket = null;
@@ -275,17 +308,36 @@
                 URL url = new URL(urlString);
                 HttpURLConnection conn = (HttpURLConnection) url.openConnection();
                 conn.setRequestMethod("GET");
+                conn.setConnectTimeout(HEALTH_CHECK_TIMEOUT); // Set connection timeout
+                conn.setReadTimeout(HEALTH_CHECK_TIMEOUT); // Set read timeout
                 conn.connect();
 
                 int responseCode = conn.getResponseCode();
-                if (responseCode != 200) {
-                    System.out.println("Server health check failed");
+                boolean currentHealthStatus = responseCode == 200;
+
+                if (responseCode == 200) {
+                    isServerHealthy = true;
+                } else {
+                    isServerHealthy = false;
                 }
-//                else {
-//                    System.out.println("Server is healthy");
-//                }
+
+                if (lastHealthStatus == null || lastHealthStatus != currentHealthStatus) {
+                    if (currentHealthStatus) {
+                        System.out.println("Server is healthy");
+                    } else {
+                        System.out.println("Server health check failed with response code: " + responseCode);
+                    }
+                    lastHealthStatus = currentHealthStatus;
+                }
             } catch (IOException e) {
-                System.out.println("Failed to perform health check: " + e.getMessage());
+                //System.out.println("Failed to perform health check: " + e.getMessage());
+                // Consider the server unhealthy in case of an exception
+                isServerHealthy = false;
+
+                if (lastHealthStatus == null || lastHealthStatus) {
+                    System.out.println("Server is Down please wait for some time or restart for new connection by choosing Option 7");
+                    lastHealthStatus = false;
+                }
             }
         }
 
