@@ -305,6 +305,10 @@ public class FileServer {
                 case "EDITED_CONTENT":
                     handleEditedContent(dataInputStream, dataOutputStream);
                     break;
+                case "UPDATE_REPLICA":
+                    handleUpdateReplica(dataInputStream);
+                    dataOutputStream.writeUTF("Replica updated successfully.");
+                    break;
                 case "DELETE":
                     fileName = dataInputStream.readUTF();
                     handleFileDeletion(dataOutputStream, fileName);
@@ -427,6 +431,20 @@ public class FileServer {
         });
     }
 
+    private static void handleUpdateReplica(DataInputStream dataInputStream) throws IOException {
+        String fileName = dataInputStream.readUTF();
+        int contentLength = dataInputStream.readInt();
+        byte[] contentBytes = new byte[contentLength];
+        dataInputStream.readFully(contentBytes);
+
+        File file = new File("Files/" + serverId, fileName);
+        Files.write(file.toPath(), contentBytes);
+
+        // Optionally, log or print a message confirming the update
+        logger.info("Replica updated: " + fileName);
+        System.out.println("Replica updated: " + fileName);
+    }
+
     private static void  selectNewPrimaryServerAndRead(String fileName, DataOutputStream dataOutputStream, DataInputStream dataInputStream, String mode,FileMetadata metadata) throws IOException {
         ServerInfo newPrimaryServer = selectServerBasedOnFileCount(metadata);
 
@@ -495,19 +513,19 @@ public class FileServer {
                             logger.error("IO Error: " + e.getMessage());
                             dataOutputStream.writeUTF("IO Error: " + e.getMessage());
                         }
-                    } else if (mode.equals("READ")) {
-                        byte[] fileContent = Files.readAllBytes(localFile.toPath());
-                        dataOutputStream.writeInt(fileContent.length);
-                        dataOutputStream.write(fileContent);
-                    } else if (mode.equals("WRITE")) {
-                        byte[] fileContent = Files.readAllBytes(localFile.toPath());
-                        dataOutputStream.writeInt(fileContent.length);
-                        dataOutputStream.write(fileContent);
-                        String command_new = dataInputStream.readUTF();
-                        if ("EDITED_CONTENT".equals(command_new)) {
-                            updateFileContent(dataInputStream, fileName);
-                        }
                     }
+                }
+            } else if (mode.equals("READ")) {
+                byte[] fileContent = Files.readAllBytes(localFile.toPath());
+                dataOutputStream.writeInt(fileContent.length);
+                dataOutputStream.write(fileContent);
+            } else if (mode.equals("WRITE")) {
+                byte[] fileContent = Files.readAllBytes(localFile.toPath());
+                dataOutputStream.writeInt(fileContent.length);
+                dataOutputStream.write(fileContent);
+                String command_new = dataInputStream.readUTF();
+                if ("EDITED_CONTENT".equals(command_new)) {
+                    updateFileContent(dataInputStream, fileName);
                 }
             }
         } else {
@@ -518,15 +536,54 @@ public class FileServer {
 
     private static void updateFileContent(DataInputStream dataInputStream, String fileName) throws IOException {
         int contentLength = dataInputStream.readInt();
-        File localFile = new File("Files/" + serverId, fileName);
+        byte[] contentBytes = new byte[contentLength];
+        dataInputStream.readFully(contentBytes);
 
-        if (contentLength > 0) {
-            byte[] contentBytes = new byte[contentLength];
-            dataInputStream.readFully(contentBytes);
-            Files.write(localFile.toPath() , contentBytes);
-            releaseLease(fileName);
+        // Fetch metadata to determine the primary server
+        FileMetadata metadata = getFileMetadataFromConsul(fileName);
+        if (metadata == null) {
+            logger.error("File metadata not found for: " + fileName);
+            return;
+        }
+
+        // Update the local file if this server is the primary server
+        if (metadata.serverId.equals(serverId)  || metadata.replicatedNodes.contains(serverId) ) {
+            File localFile = new File("Files/" + serverId, fileName);
+            Files.write(localFile.toPath(), contentBytes);
+        } else {
+            // Send the updated content to the primary server
+            sendUpdatedFileToReplica(metadata.serverId, fileName, contentBytes);
+        }
+
+        // Release the lease after updating the primary server
+        releaseLease(fileName);
+
+        // Update the replicas
+        for (String replicatedNodeId : metadata.replicatedNodes) {
+            if (!replicatedNodeId.equals(serverId)) { // Don't send to self
+                sendUpdatedFileToReplica(replicatedNodeId, fileName, contentBytes);
+            }
+        }
+
             logger.info("File updated successfully: " + fileName);
             System.out.println("File updated successfully: " + fileName);
+    }
+
+    private static void sendUpdatedFileToReplica(String nodeId, String fileName, byte[] fileContent) {
+        ServerInfo serverInfo = getServerDetailsFromConsul(nodeId);
+        if (serverInfo == null) {
+            logger.error("Replica server info not found for node ID: " + nodeId);
+            return;
+        }
+
+        try (Socket socket = new Socket(serverInfo.getAddress(), serverInfo.getPort());
+             DataOutputStream out = new DataOutputStream(socket.getOutputStream())) {
+            out.writeUTF("UPDATE_REPLICA");
+            out.writeUTF(fileName);
+            out.writeInt(fileContent.length);
+            out.write(fileContent);
+        } catch (IOException e) {
+            logger.error("Error occurred while updating replica on node " + nodeId + ": " + e.getMessage());
         }
     }
     private static void deleteLocalFile(String fileName) {
