@@ -613,29 +613,56 @@ public class FileServer {
 
 
     private static void handleFileDeletion(DataOutputStream dataOutputStream, String fileName) throws IOException {
+        // Check if the file exists locally
         File file = new File("Files/" + serverId, fileName);
-        if (file.exists()) {
-            boolean deleteSuccess = file.delete();
+        boolean localFileExists = file.exists();
 
-            FileMetadata metadata = getFileMetadataFromConsul(fileName);
-            if (metadata != null) {
-                metadata.replicatedNodes.forEach(nodeId -> deleteReplicaOnNode(nodeId, fileName));
-                kvClient.deleteKey("files/" + fileName); // Also delete metadata from Consul
+        // Fetch metadata from Consul
+        FileMetadata metadata = getFileMetadataFromConsul(fileName);
+        if (metadata != null) {
+            // Delete the file if it exists locally
+            boolean deleteSuccess = localFileExists && file.delete();
+
+            // Request deletion from the primary server and replicas
+            metadata.replicatedNodes.forEach(nodeId -> deleteReplicaOnNode(nodeId, fileName));
+            if (!serverId.equals(metadata.serverId)) { // avoid double deletion if current server is the primary
+                deleteReplicaOnNode(metadata.serverId, fileName);
             }
 
-            if (deleteSuccess) {
+            // Delete metadata from Consul
+            kvClient.deleteKey("files/" + fileName);
+
+            if (deleteSuccess || !localFileExists) {
                 dataOutputStream.writeUTF("File and its replicas deleted successfully.");
             } else {
                 dataOutputStream.writeUTF("Failed to delete the file.");
             }
-            updateFileCountInConsul(serverId, false);
+
+            // Update file count in Consul if the file existed locally
+            if (localFileExists) {
+                updateFileCountInConsul(serverId, false);
+            }
         } else {
-            dataOutputStream.writeUTF("File is not found.");
+            // Handle case where file metadata is not found in Consul
+            if (localFileExists) {
+                // Delete the file locally if it exists without metadata
+                boolean deleteSuccess = file.delete();
+                if (deleteSuccess) {
+                    dataOutputStream.writeUTF("Local file without metadata deleted successfully.");
+                } else {
+                    dataOutputStream.writeUTF("Failed to delete the local file without metadata.");
+                }
+                updateFileCountInConsul(serverId, false);
+            } else {
+                // File not found anywhere
+                dataOutputStream.writeUTF("File not found.");
+            }
         }
     }
 
+
     private static void deleteReplicaOnNode(String nodeId, String fileName) {
-        ServerInfo serverInfo = getServerDetailsFromConsul(serverId);
+        ServerInfo serverInfo = getServerDetailsFromConsul(nodeId);
 
         String serverAddress = serverInfo.getAddress();
         int serverPort = serverInfo.getPort();
